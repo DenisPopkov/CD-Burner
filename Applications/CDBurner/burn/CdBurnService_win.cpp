@@ -1,5 +1,6 @@
 #include "CdBurnPlatform.h"
 #include "../../../Source/export/RedBookExporter.h"
+#include <juce_audio_formats/juce_audio_formats.h>
 
 #if JUCE_WINDOWS
 
