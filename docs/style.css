@@ -225,13 +225,13 @@ code {
 }
 
 .hero-shot {
-  margin: 48px auto 0;
-  max-width: min(1100px, 100%);
+  margin: 40px auto 0;
+  max-width: 920px;
 }
 
 .hero-shot img {
-  display: block;
   width: 100%;
+  max-width: 880px;
   height: auto;
   margin-inline: auto;
 }
