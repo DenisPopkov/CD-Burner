@@ -230,8 +230,8 @@ code {
 }
 
 .hero-shot img {
-  width: 100%;
-  max-width: 880px;
+  width: 60%;
+  max-width: 528px;
   height: auto;
   margin-inline: auto;
 }
