@@ -22,9 +22,9 @@ jobs:
 
       - name: Apply icon
         run: |
-          python3 -m pip install --user Pillow
           APP="build/CDBurner_artefacts/Release/CD Burner.app"
-          bash scripts/apply_app_icon.sh "$APP" Assets/CdBurnerAppIcon.png
+          python3 -m pip install --break-system-packages Pillow || python3 -m pip install --user Pillow || true
+          bash scripts/apply_app_icon.sh "$APP" Assets/CdBurnerAppIcon.png || echo "WARN: icon post-process skipped"
           bash scripts/resign_mac_app.sh "$APP"
 
       - name: Verify modern macOS binary
@@ -53,9 +53,9 @@ jobs:
 
       - name: Apply icon
         run: |
-          python3 -m pip install --user Pillow
           APP="build-legacy/CDBurner_artefacts/Release/CD Burner.app"
-          bash scripts/apply_app_icon.sh "$APP" Assets/CdBurnerAppIcon.png
+          python3 -m pip install --break-system-packages Pillow || python3 -m pip install --user Pillow || true
+          bash scripts/apply_app_icon.sh "$APP" Assets/CdBurnerAppIcon.png || echo "WARN: icon post-process skipped"
           bash scripts/resign_mac_app.sh "$APP"
 
       - name: Verify legacy macOS binary

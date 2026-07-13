@@ -1,7 +1,12 @@
 #pragma once
 
 #include "../util/AppLog.h"
-#include <unistd.h>
+#if JUCE_WINDOWS
+ #include <io.h>
+ #include <stdio.h>
+#else
+ #include <unistd.h>
+#endif
 
 namespace cassette
 {
@@ -13,7 +18,11 @@ inline bool piTapeTraceEnabled()
         const auto env = juce::SystemStats::getEnvironmentVariable("DECK_PI_TRACE", "");
         if (env.isNotEmpty())
             return ! env.equalsIgnoreCase("0") && ! env.equalsIgnoreCase("false");
+#if JUCE_WINDOWS
+        return _isatty(_fileno(stdout)) != 0;
+#else
         return isatty(fileno(stdout)) != 0;
+#endif
     }();
     return enabled;
 }
