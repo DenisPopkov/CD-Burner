@@ -42,9 +42,9 @@ juce::String hresultMessage(HRESULT hr)
 
 std::vector<uint8_t> loadRedBookPcmSectors(const juce::File& wavFile)
 {
-    juce::AudioFormatManager formats;
-    formats.registerBasicFormats();
-    std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(wavFile));
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(wavFile));
     if (reader == nullptr)
         return {};
 
@@ -181,7 +181,7 @@ std::vector<CdBurnDevice> listDevices()
     }
 
     IEnumVARIANT* enumerator = nullptr;
-    hr = discMaster->EnumDiscRecorders(&enumerator);
+    hr = discMaster->get__NewEnum(&enumerator);
     if (SUCCEEDED(hr) && enumerator != nullptr)
     {
         VARIANT variant;
@@ -199,6 +199,25 @@ std::vector<CdBurnDevice> listDevices()
             VariantClear(&variant);
         }
         enumerator->Release();
+    }
+    else
+    {
+        LONG count = 0;
+        if (SUCCEEDED(discMaster->get_Count(&count)))
+        {
+            for (LONG i = 0; i < count; ++i)
+            {
+                BSTR id = nullptr;
+                if (SUCCEEDED(discMaster->get_Item(i, &id)) && id != nullptr)
+                {
+                    CdBurnDevice device;
+                    device.id = juce::String(id);
+                    device.displayName = device.id;
+                    devices.push_back(std::move(device));
+                    SysFreeString(id);
+                }
+            }
+        }
     }
 
     discMaster->Release();

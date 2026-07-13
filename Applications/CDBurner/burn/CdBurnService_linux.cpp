@@ -40,7 +40,7 @@ juce::String runAndCapture(const juce::String& executable, const juce::StringArr
     }
 
     juce::String output;
-    while (process.isRunning() || process.readProcessOutputWithoutBlocking() > 0)
+    while (process.isRunning())
     {
         char buffer[4096];
         const int read = process.readProcessOutput(buffer, static_cast<int>(sizeof(buffer)));
@@ -48,6 +48,15 @@ juce::String runAndCapture(const juce::String& executable, const juce::StringArr
             output += juce::String::fromUTF8(buffer, static_cast<size_t>(read));
         else
             juce::Thread::sleep(50);
+    }
+
+    char buffer[4096];
+    for (;;)
+    {
+        const int read = process.readProcessOutput(buffer, static_cast<int>(sizeof(buffer)));
+        if (read <= 0)
+            break;
+        output += juce::String::fromUTF8(buffer, static_cast<size_t>(read));
     }
 
     exitCode = process.getExitCode();
