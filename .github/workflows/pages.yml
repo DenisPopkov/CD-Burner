@@ -1,0 +1,237 @@
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            app:
+              - 'Source/**'
+              - 'Applications/**'
+              - 'cmake/**'
+              - 'CMakeLists.txt'
+              - 'Assets/**'
+              - 'scripts/**'
+              - '.github/workflows/pages.yml'
+              - 'docs/**'
+
+  build_windows:
+    needs: changes
+    if: needs.changes.outputs.app == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure and build (MSVC)
+        run: |
+          cmake -C cmake/ProdOptions.cmake -B build -DCMAKE_BUILD_TYPE=Release -DCASSETTE_BUILD_TESTS=OFF
+          cmake --build build --config Release --target CDBurner -j 3
+
+      - name: Package Windows zip for Pages
+        shell: pwsh
+        run: |
+          $dir = "build/CDBurner_artefacts/Release"
+          $exe = Get-ChildItem -Path $dir -Filter "*.exe" -Recurse | Select-Object -First 1
+          if (-not $exe) { throw "CD Burner executable not found under $dir" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item $exe.FullName dist/
+          Compress-Archive -Path dist/* -DestinationPath CD-Burner-Windows-latest.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CD-Burner-Windows-pages
+          path: CD-Burner-Windows-latest.zip
+          retention-days: 14
+
+  build_linux:
+    needs: changes
+    if: needs.changes.outputs.app == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config \
+            libasound2-dev libfreetype6-dev libfontconfig1-dev libcurl4-openssl-dev \
+            libx11-dev libxrandr-dev libxcursor-dev libxinerama-dev libxext-dev libxrender-dev \
+            libgl-dev libglu1-mesa-dev
+
+      - name: Configure and build
+        run: |
+          cmake -C cmake/ProdOptions.cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCASSETTE_BUILD_TESTS=OFF
+          cmake --build build --target CDBurner --parallel
+
+      - name: Package Linux tarball for Pages
+        run: |
+          VERSION="$(sed -n 's/^project(Deck VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          ./scripts/package_cd_burner_linux.sh build Release "$VERSION"
+          cp "dist/CD-Burner-${VERSION}-Linux.tar.gz" CD-Burner-Linux-latest.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CD-Burner-Linux-pages
+          path: CD-Burner-Linux-latest.tar.gz
+          retention-days: 14
+
+  build_macos_legacy:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Mojave package
+        env:
+          CASSETTE_SKIP_APP_ICON: "ON"
+        run: ./scripts/package_cd_burner_legacy_mac.sh
+
+      - name: Stage Pages zip
+        run: |
+          ./scripts/apply_app_icon.sh "dist/macOS-Legacy/CD Burner.app" Assets/CdBurnerAppIcon.png || true
+          ./scripts/resign_mac_app.sh "dist/macOS-Legacy/CD Burner.app" || true
+          cp dist/CD-Burner-*-macOS-Mojave.zip CD-Burner-macOS-Mojave-latest.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CD-Burner-macOS-Mojave-pages
+          path: CD-Burner-macOS-Mojave-latest.zip
+          retention-days: 14
+
+  deploy:
+    needs: [changes, build_windows, build_linux, build_macos_legacy]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore cached Windows package
+        uses: actions/cache/restore@v4
+        with:
+          path: cached-downloads
+          key: cdburner-windows-latest
+          restore-keys: cdburner-windows-
+
+      - name: Restore cached Linux package
+        uses: actions/cache/restore@v4
+        with:
+          path: cached-linux-downloads
+          key: cdburner-linux-latest
+          restore-keys: cdburner-linux-
+
+      - name: Restore cached Mojave package
+        uses: actions/cache/restore@v4
+        with:
+          path: cached-macos-legacy-downloads
+          key: cdburner-macos-mojave-latest
+          restore-keys: cdburner-macos-mojave-
+
+      - name: Download Windows package
+        if: needs.build_windows.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: CD-Burner-Windows-pages
+          path: fresh-windows-downloads
+
+      - name: Download Linux package
+        if: needs.build_linux.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: CD-Burner-Linux-pages
+          path: fresh-linux-downloads
+
+      - name: Download Mojave package
+        if: needs.build_macos_legacy.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: CD-Burner-macOS-Mojave-pages
+          path: fresh-macos-legacy-downloads
+
+      - name: Update Windows package cache
+        if: needs.build_windows.result == 'success'
+        run: |
+          rm -rf cached-downloads
+          mkdir -p cached-downloads
+          cp fresh-windows-downloads/CD-Burner-Windows-latest.zip cached-downloads/
+
+      - uses: actions/cache/save@v4
+        if: needs.build_windows.result == 'success'
+        with:
+          path: cached-downloads
+          key: cdburner-windows-latest
+
+      - name: Update Linux package cache
+        if: needs.build_linux.result == 'success'
+        run: |
+          rm -rf cached-linux-downloads
+          mkdir -p cached-linux-downloads
+          cp fresh-linux-downloads/CD-Burner-Linux-latest.tar.gz cached-linux-downloads/
+
+      - uses: actions/cache/save@v4
+        if: needs.build_linux.result == 'success'
+        with:
+          path: cached-linux-downloads
+          key: cdburner-linux-latest
+
+      - name: Update Mojave package cache
+        if: needs.build_macos_legacy.result == 'success'
+        run: |
+          rm -rf cached-macos-legacy-downloads
+          mkdir -p cached-macos-legacy-downloads
+          cp fresh-macos-legacy-downloads/CD-Burner-macOS-Mojave-latest.zip cached-macos-legacy-downloads/
+
+      - uses: actions/cache/save@v4
+        if: needs.build_macos_legacy.result == 'success'
+        with:
+          path: cached-macos-legacy-downloads
+          key: cdburner-macos-mojave-latest
+
+      - name: Prepare Pages content
+        run: |
+          rm -rf page-build/site
+          mkdir -p page-build/site/downloads
+          cp -R docs/. page-build/site/
+          if [ -f fresh-windows-downloads/CD-Burner-Windows-latest.zip ]; then
+            cp fresh-windows-downloads/CD-Burner-Windows-latest.zip page-build/site/downloads/CD-Burner-Windows-latest.zip
+          elif [ -f cached-downloads/CD-Burner-Windows-latest.zip ]; then
+            cp cached-downloads/CD-Burner-Windows-latest.zip page-build/site/downloads/CD-Burner-Windows-latest.zip
+          fi
+          if [ -f fresh-linux-downloads/CD-Burner-Linux-latest.tar.gz ]; then
+            cp fresh-linux-downloads/CD-Burner-Linux-latest.tar.gz page-build/site/downloads/CD-Burner-Linux-latest.tar.gz
+          elif [ -f cached-linux-downloads/CD-Burner-Linux-latest.tar.gz ]; then
+            cp cached-linux-downloads/CD-Burner-Linux-latest.tar.gz page-build/site/downloads/CD-Burner-Linux-latest.tar.gz
+          fi
+          if [ -f fresh-macos-legacy-downloads/CD-Burner-macOS-Mojave-latest.zip ]; then
+            cp fresh-macos-legacy-downloads/CD-Burner-macOS-Mojave-latest.zip page-build/site/downloads/CD-Burner-macOS-Mojave-latest.zip
+          elif [ -f cached-macos-legacy-downloads/CD-Burner-macOS-Mojave-latest.zip ]; then
+            cp cached-macos-legacy-downloads/CD-Burner-macOS-Mojave-latest.zip page-build/site/downloads/CD-Burner-macOS-Mojave-latest.zip
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: page-build/site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

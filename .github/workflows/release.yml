@@ -1,0 +1,157 @@
+name: Release builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure and build
+        run: |
+          cmake -C cmake/ProdOptions.cmake -B build -DCMAKE_BUILD_TYPE=Release -DCASSETTE_BUILD_TESTS=OFF -DCASSETTE_SKIP_APP_ICON=ON -DCASSETTE_ENABLE_PI_TAPE=OFF
+          cmake --build build --config Release --target CDBurner -j3
+
+      - name: Apply icon
+        run: |
+          APP="build/CDBurner_artefacts/Release/CD Burner.app"
+          ./scripts/apply_app_icon.sh "$APP" Assets/CdBurnerAppIcon.png
+          ./scripts/resign_mac_app.sh "$APP"
+
+      - name: Verify modern macOS binary
+        run: ./scripts/verify_cd_burner_app.sh "build/CDBurner_artefacts/Release/CD Burner.app" --modern
+
+      - name: Package zip
+        run: |
+          APP="build/CDBurner_artefacts/Release/CD Burner.app"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" CD-Burner-macOS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CD-Burner-macOS
+          path: CD-Burner-macOS.zip
+          retention-days: 14
+
+  macos-legacy:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure and build (Mojave x86_64)
+        run: |
+          cmake -C cmake/LegacyMacOptions.cmake -B build-legacy -DCMAKE_BUILD_TYPE=Release -DCASSETTE_BUILD_TESTS=OFF -DCASSETTE_SKIP_APP_ICON=ON
+          cmake --build build-legacy --config Release --target CDBurner -j3
+
+      - name: Apply icon
+        run: |
+          APP="build-legacy/CDBurner_artefacts/Release/CD Burner.app"
+          ./scripts/apply_app_icon.sh "$APP" Assets/CdBurnerAppIcon.png
+          ./scripts/resign_mac_app.sh "$APP"
+
+      - name: Verify legacy macOS binary
+        run: ./scripts/verify_cd_burner_app.sh "build-legacy/CDBurner_artefacts/Release/CD Burner.app" --legacy
+
+      - name: Package zip
+        run: |
+          APP="build-legacy/CDBurner_artefacts/Release/CD Burner.app"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" CD-Burner-macOS-Mojave.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CD-Burner-macOS-Mojave
+          path: CD-Burner-macOS-Mojave.zip
+          retention-days: 14
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure and build (MSVC)
+        run: |
+          cmake -C cmake/ProdOptions.cmake -B build -DCMAKE_BUILD_TYPE=Release -DCASSETTE_BUILD_TESTS=OFF -DCASSETTE_ENABLE_PI_TAPE=OFF
+          cmake --build build --config Release --target CDBurner -j 3
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $dir = "build/CDBurner_artefacts/Release"
+          $exe = Get-ChildItem -Path $dir -Filter "*.exe" -Recurse | Select-Object -First 1
+          if (-not $exe) { throw "CD Burner executable not found under $dir" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item $exe.FullName dist/
+          Compress-Archive -Path dist/* -DestinationPath CD-Burner-Windows.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CD-Burner-Windows
+          path: CD-Burner-Windows.zip
+          retention-days: 14
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config \
+            libasound2-dev libfreetype6-dev libfontconfig1-dev libcurl4-openssl-dev \
+            libx11-dev libxrandr-dev libxcursor-dev libxinerama-dev libxext-dev libxrender-dev \
+            libgl-dev libglu1-mesa-dev
+
+      - name: Configure and build
+        run: |
+          cmake -C cmake/ProdOptions.cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCASSETTE_BUILD_TESTS=OFF -DCASSETTE_ENABLE_PI_TAPE=OFF
+          cmake --build build --target CDBurner --parallel
+
+      - name: Package tarball
+        run: |
+          VERSION="$(sed -n 's/^project(Deck VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          ./scripts/package_cd_burner_linux.sh build Release "$VERSION"
+          cp "dist/CD-Burner-${VERSION}-Linux.tar.gz" CD-Burner-Linux.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CD-Burner-Linux
+          path: CD-Burner-Linux.tar.gz
+          retention-days: 14
+
+  release:
+    needs: [macos, macos-legacy, windows, linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          find artifacts -name 'CD-Burner-Windows.zip' -exec cp {} . \;
+          find artifacts -name 'CD-Burner-Linux.tar.gz' -exec cp {} . \;
+          find artifacts -name 'CD-Burner-macOS.zip' -exec cp {} . \;
+          find artifacts -name 'CD-Burner-macOS-Mojave.zip' -exec cp {} . \;
+          ls -la CD-Burner-macOS.zip CD-Burner-macOS-Mojave.zip CD-Burner-Windows.zip CD-Burner-Linux.tar.gz
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            CD-Burner-macOS.zip
+            CD-Burner-macOS-Mojave.zip
+            CD-Burner-Windows.zip
+            CD-Burner-Linux.tar.gz

@@ -1,0 +1,499 @@
+cmake_minimum_required(VERSION 3.22)
+
+project(Deck VERSION 0.2.11 LANGUAGES C CXX)
+
+option(CASSETTE_LEGACY_MACOS "Build for Intel macOS 10.14+ (Mojave)" OFF)
+
+if(CASSETTE_LEGACY_MACOS)
+    set(CMAKE_CXX_STANDARD 17)
+else()
+    set(CMAKE_CXX_STANDARD 20)
+endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+option(CASSETTE_BUILD_ESSENTIA "Link Essentia for offline analysis" OFF)
+option(CASSETTE_BUILD_ONNX "Link ONNX Runtime for ML tape saturation" OFF)
+option(CASSETTE_BUILD_RUBBERBAND "Link Rubber Band for wow/flutter emulation" OFF)
+option(CASSETTE_BUILD_GSTPEAQ "Enable GstPEAQ runtime ODG (needs gstreamer at runtime)" ON)
+option(CASSETTE_BUILD_TESTS "Build mastering adequacy tests" ON)
+option(CASSETTE_BUILD_PLUGIN "Build VST3/AU Cassette Tape Prep plugin" OFF)
+option(CASSETTE_BUILD_BURNER "Build CassetteBurner timeline app" OFF)
+option(CASSETTE_SKIP_APP_ICON "Skip squircle icon post-processing (CI/minimal builds)" OFF)
+option(CASSETTE_ENABLE_PI_TAPE "Private dev-only Pi FTP upload (never enable in release CI)" OFF)
+
+if(DEFINED ENV{CI} AND CASSETTE_ENABLE_PI_TAPE)
+    message(FATAL_ERROR
+        "CASSETTE_ENABLE_PI_TAPE must remain OFF in CI/release builds. "
+        "Use cmake --preset pi-dev or -DCASSETTE_ENABLE_PI_TAPE=ON in a separate build-pi tree only.")
+endif()
+
+if(CASSETTE_ENABLE_PI_TAPE)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/LocalPiTape.cmake")
+        include(cmake/LocalPiTape.cmake)
+        message(STATUS "Loaded local Pi tape settings: cmake/LocalPiTape.cmake")
+    endif()
+    message(STATUS "Pi tape FTP upload: ENABLED (dev-only build)")
+else()
+    set(CASSETTE_ENABLE_PI_TAPE OFF CACHE BOOL "Private dev-only Pi FTP upload" FORCE)
+    message(STATUS "Pi tape FTP upload: disabled (production default)")
+endif()
+
+include(FetchContent)
+
+FetchContent_Declare(
+    JUCE
+    GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
+    GIT_TAG 8.0.4
+    GIT_SHALLOW TRUE
+)
+
+# JUCE built-in MP3 decoder (cross-platform). Legal responsibility is on the app publisher.
+add_compile_definitions(JUCE_USE_MP3AUDIOFORMAT=1)
+
+FetchContent_MakeAvailable(JUCE)
+
+include(cmake/CassetteCore.cmake)
+include(cmake/OptionalDeps.cmake)
+include(cmake/MacPlatform.cmake)
+
+add_library(cassette_core STATIC ${CASSETTE_CORE_SOURCES})
+cassette_configure_core_target(cassette_core)
+
+if(CASSETTE_ENABLE_PI_TAPE)
+    target_compile_definitions(cassette_core PUBLIC CASSETTE_ENABLE_PI_TAPE=1)
+else()
+    target_compile_definitions(cassette_core PUBLIC CASSETTE_ENABLE_PI_TAPE=0)
+endif()
+
+if(CASSETTE_BUILD_ONNX)
+    cassette_find_onnxruntime(CASSETTE_ONNX_FOUND)
+    if(CASSETTE_ONNX_FOUND)
+        message(STATUS "ONNX Runtime: ${CASSETTE_ONNX_LIBRARY}")
+        target_include_directories(cassette_core PRIVATE ${CASSETTE_ONNX_INCLUDE})
+        target_link_libraries(cassette_core PRIVATE ${CASSETTE_ONNX_LIBRARY})
+        target_compile_definitions(cassette_core PRIVATE CASSETTE_HAS_ONNX=1)
+    else()
+        message(STATUS "CASSETTE_BUILD_ONNX=ON but ONNX Runtime not found — using STN grid only")
+    endif()
+endif()
+
+if(CASSETTE_BUILD_RUBBERBAND)
+    cassette_find_rubberband(CASSETTE_RUBBERBAND_FOUND)
+    if(CASSETTE_RUBBERBAND_FOUND)
+        message(STATUS "Rubber Band: ${CASSETTE_RUBBERBAND_LIBRARY}")
+        target_include_directories(cassette_core PRIVATE ${CASSETTE_RUBBERBAND_INCLUDE})
+        target_link_libraries(cassette_core PRIVATE ${CASSETTE_RUBBERBAND_LIBRARY})
+        target_compile_definitions(cassette_core PRIVATE CASSETTE_HAS_RUBBERBAND=1)
+    else()
+        message(STATUS "CASSETTE_BUILD_RUBBERBAND=ON but librubberband not found — using wow emulator")
+    endif()
+endif()
+
+set(CASSETTE_APP_ICON "${CMAKE_SOURCE_DIR}/Assets/AppIcon.png")
+set(CDBURNER_APP_ICON "${CMAKE_SOURCE_DIR}/Assets/CdBurnerAppIcon.png")
+
+juce_add_gui_app(Deck
+    PRODUCT_NAME "Deck"
+    COMPANY_NAME "Deck"
+    BUNDLE_ID com.deck.app
+    ICON_BIG "${CASSETTE_APP_ICON}"
+    NEEDS_CURL FALSE
+    NEEDS_WEB_BROWSER FALSE
+)
+
+target_sources(Deck PRIVATE
+    Source/Main.cpp
+    Source/ui/MainComponent.cpp
+    Source/ui/TapeSetupPanel.cpp
+    Source/ui/ProcessingOptionsPanel.cpp
+    Source/ui/ProcessingSettingsDialog.cpp
+    Source/ui/MixtapeBuilderPanel.cpp
+    Source/ui/ReadinessPanel.cpp
+    Source/ui/WorkflowStrip.cpp
+    Source/ui/PreviewMonitorPanel.cpp
+    Source/ui/AudioDropTarget.cpp
+    Source/ui/MeterPanel.cpp
+    Source/ui/CompareWaveformDisplay.cpp
+    Source/ui/look/CassetteLook.cpp
+    Source/ui/WizardStepStrip.cpp
+    Source/ui/TrackListEditor.cpp
+    Source/ui/ConfirmDialog.cpp
+    Source/ui/DropHeroPanel.cpp
+    Source/ui/MoreOptionsPanel.cpp
+    Source/threading/AnalysisWorker.cpp
+    Source/util/AppLog.cpp
+    Source/util/AppLocale.cpp
+)
+
+target_include_directories(Deck PRIVATE
+    Source
+    Source/io
+    Source/threading
+    Source/ui
+)
+
+target_compile_definitions(Deck PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_DISPLAY_SPLASH_SCREEN=0
+    JUCE_MODAL_LOOPS_PERMITTED=1
+)
+
+if(CASSETTE_ENABLE_PI_TAPE)
+    target_compile_definitions(Deck PRIVATE CASSETTE_ENABLE_PI_TAPE=1)
+else()
+    target_compile_definitions(Deck PRIVATE CASSETTE_ENABLE_PI_TAPE=0)
+endif()
+
+if(CASSETTE_ENABLE_PI_TAPE)
+    target_sources(Deck PRIVATE
+        Source/ui/PiTapeSettingsPanel.cpp
+        Source/ui/PiTapeControlDialog.cpp
+    )
+endif()
+
+target_link_libraries(Deck PRIVATE
+    cassette_core
+    juce::juce_audio_utils
+    juce::juce_audio_devices
+    juce::juce_gui_extra
+)
+deck_apply_macos_target_properties(Deck)
+deck_apply_macos_target_properties(cassette_core)
+
+if(CASSETTE_BUILD_ESSENTIA)
+    cassette_find_essentia(CASSETTE_ESSENTIA_FOUND)
+    if(CASSETTE_ESSENTIA_FOUND)
+        message(STATUS "Essentia: ${CASSETTE_ESSENTIA_LIBRARY}")
+        target_include_directories(cassette_core PRIVATE ${CASSETTE_ESSENTIA_INCLUDE})
+        target_link_libraries(cassette_core PRIVATE ${CASSETTE_ESSENTIA_LIBRARY})
+        target_compile_definitions(cassette_core PRIVATE CASSETTE_HAS_ESSENTIA=1)
+        target_compile_definitions(Deck PRIVATE CASSETTE_HAS_ESSENTIA=1)
+    else()
+        message(STATUS "CASSETTE_BUILD_ESSENTIA=ON but Essentia not found — using built-in LoudnessMeter")
+    endif()
+endif()
+
+if(CASSETTE_BUILD_GSTPEAQ)
+    target_compile_definitions(cassette_core PRIVATE CASSETTE_HAS_GSTPEAQ=1)
+    target_compile_definitions(Deck PRIVATE CASSETTE_HAS_GSTPEAQ=1)
+endif()
+
+juce_generate_juce_header(Deck)
+
+# --- CD Burner (CD-oriented Deck sibling) ---
+juce_add_gui_app(CDBurner
+    PRODUCT_NAME "CD Burner"
+    COMPANY_NAME "Deck"
+    BUNDLE_ID com.deck.cdburner
+    ICON_BIG "${CDBURNER_APP_ICON}"
+    NEEDS_CURL FALSE
+    NEEDS_WEB_BROWSER FALSE
+)
+
+target_sources(CDBurner PRIVATE
+    Applications/CDBurner/Main.cpp
+    Applications/CDBurner/ui/MainComponent.cpp
+    Applications/CDBurner/ui/DiscSetupPanel.cpp
+    Applications/CDBurner/locale/CdBurnerLocale.cpp
+    Source/ui/MixtapeBuilderPanel.cpp
+    Source/ui/AudioDropTarget.cpp
+    Source/ui/CompareWaveformDisplay.cpp
+    Source/ui/TrackListEditor.cpp
+    Source/ui/ConfirmDialog.cpp
+    Source/ui/DropHeroPanel.cpp
+    Source/ui/WizardStepStrip.cpp
+    Source/ui/look/CassetteLook.cpp
+    Source/threading/AnalysisWorker.cpp
+    Source/util/AppLog.cpp
+    Source/util/AppLocale.cpp
+)
+
+target_include_directories(CDBurner PRIVATE
+    Applications/CDBurner
+    Applications/CDBurner/ui
+    Applications/CDBurner/locale
+    Source
+    Source/io
+    Source/threading
+    Source/ui
+)
+
+target_compile_definitions(CDBurner PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_DISPLAY_SPLASH_SCREEN=0
+    JUCE_MODAL_LOOPS_PERMITTED=1
+    CASSETTE_ENABLE_PI_TAPE=0
+)
+
+target_link_libraries(CDBurner PRIVATE
+    cassette_core
+    juce::juce_audio_utils
+    juce::juce_audio_devices
+    juce::juce_gui_extra
+)
+
+deck_apply_macos_target_properties(CDBurner)
+juce_generate_juce_header(CDBurner)
+
+if(APPLE)
+    if(NOT CASSETTE_SKIP_APP_ICON)
+        add_custom_command(
+            TARGET CDBurner
+            POST_BUILD
+            COMMAND /bin/bash "${CMAKE_SOURCE_DIR}/scripts/apply_app_icon.sh"
+                    "$<TARGET_FILE_DIR:CDBurner>/../.."
+                    "${CDBURNER_APP_ICON}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            COMMENT "Applying CD Burner Dock icon"
+        )
+    endif()
+
+    add_custom_command(
+        TARGET CDBurner
+        POST_BUILD
+        COMMAND /bin/bash "${CMAKE_SOURCE_DIR}/scripts/resign_mac_app.sh"
+                "$<TARGET_FILE_DIR:CDBurner>/../.."
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Re-signing CD Burner macOS app bundle"
+    )
+endif()
+
+# JUCE rebuilds a square Icon.icns from AppIcon.png; restore squircle after each link.
+if(APPLE)
+    if(NOT CASSETTE_SKIP_APP_ICON)
+        add_custom_command(
+            TARGET Deck
+            POST_BUILD
+            COMMAND /bin/bash "${CMAKE_SOURCE_DIR}/scripts/apply_app_icon.sh"
+                    "$<TARGET_FILE_DIR:Deck>/../.."
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            COMMENT "Applying squircle Dock icon"
+        )
+    endif()
+
+    add_custom_command(
+        TARGET Deck
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:Deck>/../Resources/scripts"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/scripts/run_peaq.sh"
+                "$<TARGET_FILE_DIR:Deck>/../Resources/scripts/run_peaq.sh"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:Deck>/../Resources/models"
+        COMMAND /bin/bash "${CMAKE_SOURCE_DIR}/scripts/copy_stn_onnx_if_present.sh"
+                "${CMAKE_SOURCE_DIR}/models/tape_stn.onnx"
+                "$<TARGET_FILE_DIR:Deck>/../Resources/models/tape_stn.onnx"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Bundling GstPEAQ script and optional STN model (macOS)"
+    )
+
+    add_custom_command(
+        TARGET Deck
+        POST_BUILD
+        COMMAND /bin/bash "${CMAKE_SOURCE_DIR}/scripts/resign_mac_app.sh"
+                "$<TARGET_FILE_DIR:Deck>/../.."
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Re-signing macOS app bundle after resource changes"
+    )
+endif()
+
+if(UNIX AND NOT APPLE)
+    add_custom_command(
+        TARGET Deck
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:Deck>/scripts"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/scripts/run_peaq.sh"
+                "$<TARGET_FILE_DIR:Deck>/scripts/run_peaq.sh"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:Deck>/models"
+        COMMAND /bin/bash "${CMAKE_SOURCE_DIR}/scripts/copy_stn_onnx_if_present.sh"
+                "${CMAKE_SOURCE_DIR}/models/tape_stn.onnx"
+                "$<TARGET_FILE_DIR:Deck>/models/tape_stn.onnx"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Bundling GstPEAQ script and optional STN model (Linux)"
+    )
+endif()
+
+if(CASSETTE_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(DeckTests Tests/MasteringTests.cpp)
+    cassette_configure_core_target(DeckTests)
+    target_sources(DeckTests PRIVATE Tests/TestAppLogStub.cpp)
+    target_link_libraries(DeckTests PRIVATE cassette_core)
+    if(CASSETTE_BUILD_GSTPEAQ)
+        target_compile_definitions(DeckTests PRIVATE CASSETTE_HAS_GSTPEAQ=1)
+    endif()
+    if(CASSETTE_BUILD_ONNX AND CASSETTE_ONNX_FOUND)
+        target_compile_definitions(DeckTests PRIVATE CASSETTE_HAS_ONNX=1)
+        target_compile_definitions(DeckTests PRIVATE
+            CASSETTE_STN_MODEL="${CMAKE_SOURCE_DIR}/models/tape_stn.onnx")
+    endif()
+    if(CASSETTE_BUILD_RUBBERBAND AND CASSETTE_RUBBERBAND_FOUND)
+        target_compile_definitions(DeckTests PRIVATE CASSETTE_HAS_RUBBERBAND=1)
+    endif()
+
+    set(CASSETTE_CHARLI_FIXTURE "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Charli-XCX-SS26-Rock-Music.fixture.flac")
+    if(EXISTS "${CASSETTE_CHARLI_FIXTURE}")
+        target_compile_definitions(DeckTests PRIVATE
+            CASSETTE_CHARLI_FIXTURE="${CASSETTE_CHARLI_FIXTURE}")
+    endif()
+
+    add_test(NAME MasteringAdequacy COMMAND DeckTests)
+
+    add_executable(CassetteAnalyzeExport Tools/AnalyzeExport.cpp)
+    cassette_configure_core_target(CassetteAnalyzeExport)
+    target_sources(CassetteAnalyzeExport PRIVATE Tests/TestAppLogStub.cpp)
+    target_link_libraries(CassetteAnalyzeExport PRIVATE cassette_core)
+
+    add_executable(CassetteRenderCompare Tools/RenderCompare.cpp)
+    cassette_configure_core_target(CassetteRenderCompare)
+    target_link_libraries(CassetteRenderCompare PRIVATE cassette_core)
+
+    if(CASSETTE_ENABLE_PI_TAPE)
+        add_executable(PiTapeUploadTest Tools/PiTapeUploadTest.cpp)
+        cassette_configure_core_target(PiTapeUploadTest)
+        target_sources(PiTapeUploadTest PRIVATE Tests/TestAppLogStub.cpp)
+        target_link_libraries(PiTapeUploadTest PRIVATE cassette_core)
+
+        add_executable(PiTapeFlowTest Tools/PiTapeFlowTest.cpp)
+        cassette_configure_core_target(PiTapeFlowTest)
+        target_sources(PiTapeFlowTest PRIVATE Tests/TestAppLogStub.cpp)
+        target_link_libraries(PiTapeFlowTest PRIVATE cassette_core)
+
+        set(PI_TAPE_SIDE_A "${CMAKE_SOURCE_DIR}/Tests/Fixtures/Charli-XCX-SS26-Rock-Music.fixture.flac")
+        if(NOT EXISTS "${PI_TAPE_SIDE_A}")
+            set(PI_TAPE_SIDE_A "$ENV{HOME}/Downloads/1-Charli-XCX-SS26-MHSFC1.flac")
+        endif()
+        if(EXISTS "${PI_TAPE_SIDE_A}")
+            add_test(NAME PiTapeUploadIntegration
+                     COMMAND PiTapeUploadTest --host 192.168.1.119 --side-a "${PI_TAPE_SIDE_A}")
+            set_tests_properties(PiTapeUploadIntegration PROPERTIES
+                ENVIRONMENT "PI_TAPE_HOST=192.168.1.119"
+                TIMEOUT 120
+                LABELS "integration;pi-tape")
+        endif()
+    endif()
+
+    set(EXPORT_ORIGINAL "${CMAKE_SOURCE_DIR}/../Experiment/Digital Master.flac")
+    set(EXPORT_MASTERED "${CMAKE_SOURCE_DIR}/../Experiment/Digital Master_cassette.wav")
+    if(EXISTS "${EXPORT_ORIGINAL}" AND EXISTS "${EXPORT_MASTERED}")
+        add_test(NAME ExportDigitalMasterCheck
+                 COMMAND CassetteAnalyzeExport "${EXPORT_ORIGINAL}" "${EXPORT_MASTERED}")
+    endif()
+endif()
+
+if(CASSETTE_BUILD_BURNER)
+    juce_add_gui_app(CassetteBurner
+        PRODUCT_NAME "CassetteBurner"
+        COMPANY_NAME "Deck"
+        BUNDLE_ID com.cassetteautomaster.burner
+        ICON_BIG "${CASSETTE_APP_ICON}"
+        NEEDS_CURL FALSE
+        NEEDS_WEB_BROWSER FALSE
+    )
+
+    target_sources(CassetteBurner PRIVATE
+        Source/MainBurner.cpp
+        Source/ui/burner/CassetteBurnerComponent.cpp
+        Source/ui/burner/TapeParameterPanel.cpp
+        Source/ui/burner/TapeTimelineView.cpp
+        Source/ui/burner/TransportBar.cpp
+        Source/ui/burner/ProjectSidebar.cpp
+        Source/ui/burner/StatusBar.cpp
+        Source/ui/burner/AnalogVuMeter.cpp
+        Source/ui/look/CassetteBurnerLook.cpp
+        Source/ui/TrackListEditor.cpp
+        Source/threading/AnalysisWorker.cpp
+        Source/util/AppLog.cpp
+    )
+
+    target_include_directories(CassetteBurner PRIVATE
+        Source
+        Source/ui
+        Source/ui/burner
+        Source/threading
+    )
+
+    target_compile_definitions(CassetteBurner PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_DISPLAY_SPLASH_SCREEN=0
+        JUCE_MODAL_LOOPS_PERMITTED=1
+    )
+
+    target_link_libraries(CassetteBurner PRIVATE
+        cassette_core
+        juce::juce_audio_utils
+        juce::juce_audio_devices
+        juce::juce_gui_extra
+    )
+
+    if(CASSETTE_BUILD_GSTPEAQ)
+        target_compile_definitions(CassetteBurner PRIVATE CASSETTE_HAS_GSTPEAQ=1)
+    endif()
+
+    juce_generate_juce_header(CassetteBurner)
+
+    if(APPLE)
+        add_custom_command(
+            TARGET CassetteBurner
+            POST_BUILD
+            COMMAND /bin/bash "${CMAKE_SOURCE_DIR}/scripts/apply_app_icon.sh"
+                    "$<TARGET_FILE_DIR:CassetteBurner>/../.."
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            COMMENT "Applying squircle Dock icon (CassetteBurner)"
+        )
+    endif()
+endif()
+
+if(CASSETTE_BUILD_PLUGIN)
+    juce_add_plugin(CassetteTapePrep
+        VERSION 0.9.0
+        COMPANY_NAME "Deck"
+        IS_SYNTH FALSE
+        NEEDS_MIDI_INPUT FALSE
+        NEEDS_MIDI_OUTPUT FALSE
+        IS_MIDI_EFFECT FALSE
+        EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+        COPY_PLUGIN_AFTER_BUILD TRUE
+        PLUGIN_MANUFACTURER_CODE Casm
+        PLUGIN_CODE Ctpr
+        FORMATS AU VST3
+        PRODUCT_NAME "Cassette Tape Prep"
+    )
+
+    target_sources(CassetteTapePrep PRIVATE
+        Source/plugin/CassetteTapePrepProcessor.cpp
+        Source/plugin/CassetteTapePrepEditor.cpp
+    )
+
+    target_compile_definitions(CassetteTapePrep PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0
+    )
+
+    target_link_libraries(CassetteTapePrep PRIVATE
+        cassette_core
+        juce::juce_audio_utils
+        juce::juce_audio_processors
+    )
+
+    juce_generate_juce_header(CassetteTapePrep)
+
+    if(CASSETTE_BUILD_ESSENTIA AND CASSETTE_ESSENTIA_FOUND)
+        target_compile_definitions(CassetteTapePrep PRIVATE CASSETTE_HAS_ESSENTIA=1)
+    endif()
+    if(CASSETTE_BUILD_ONNX AND CASSETTE_ONNX_FOUND)
+        target_compile_definitions(CassetteTapePrep PRIVATE CASSETTE_HAS_ONNX=1)
+    endif()
+    if(CASSETTE_BUILD_RUBBERBAND AND CASSETTE_RUBBERBAND_FOUND)
+        target_compile_definitions(CassetteTapePrep PRIVATE CASSETTE_HAS_RUBBERBAND=1)
+    endif()
+endif()

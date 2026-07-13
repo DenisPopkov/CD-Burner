@@ -1,0 +1,13 @@
+# CD Burner ignore
+build/
+build-*/
+cmake-build*/
+dist/
+.idea/
+.DS_Store
+*.log
+models/
+pi-tape/
+Tests/Fixtures/
+**/Deck-*.zip
+**/Deck-*.tar.gz
