@@ -33,7 +33,6 @@ jobs:
               - 'Assets/**'
               - 'scripts/**'
               - '.github/workflows/pages.yml'
-              - 'docs/**'
 
   build_windows:
     needs: changes
@@ -96,6 +95,8 @@ jobs:
           retention-days: 14
 
   build_macos_legacy:
+    needs: changes
+    if: needs.changes.outputs.app == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
