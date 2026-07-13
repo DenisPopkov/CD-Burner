@@ -22,12 +22,13 @@ jobs:
 
       - name: Apply icon
         run: |
+          python3 -m pip install --user Pillow
           APP="build/CDBurner_artefacts/Release/CD Burner.app"
-          ./scripts/apply_app_icon.sh "$APP" Assets/CdBurnerAppIcon.png
-          ./scripts/resign_mac_app.sh "$APP"
+          bash scripts/apply_app_icon.sh "$APP" Assets/CdBurnerAppIcon.png
+          bash scripts/resign_mac_app.sh "$APP"
 
       - name: Verify modern macOS binary
-        run: ./scripts/verify_cd_burner_app.sh "build/CDBurner_artefacts/Release/CD Burner.app" --modern
+        run: bash scripts/verify_cd_burner_app.sh "build/CDBurner_artefacts/Release/CD Burner.app" --modern
 
       - name: Package zip
         run: |
@@ -52,12 +53,13 @@ jobs:
 
       - name: Apply icon
         run: |
+          python3 -m pip install --user Pillow
           APP="build-legacy/CDBurner_artefacts/Release/CD Burner.app"
-          ./scripts/apply_app_icon.sh "$APP" Assets/CdBurnerAppIcon.png
-          ./scripts/resign_mac_app.sh "$APP"
+          bash scripts/apply_app_icon.sh "$APP" Assets/CdBurnerAppIcon.png
+          bash scripts/resign_mac_app.sh "$APP"
 
       - name: Verify legacy macOS binary
-        run: ./scripts/verify_cd_burner_app.sh "build-legacy/CDBurner_artefacts/Release/CD Burner.app" --legacy
+        run: bash scripts/verify_cd_burner_app.sh "build-legacy/CDBurner_artefacts/Release/CD Burner.app" --legacy
 
       - name: Package zip
         run: |
@@ -117,7 +119,7 @@ jobs:
       - name: Package tarball
         run: |
           VERSION="$(sed -n 's/^project(Deck VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
-          ./scripts/package_cd_burner_linux.sh build Release "$VERSION"
+          bash scripts/package_cd_burner_linux.sh build Release "$VERSION"
           cp "dist/CD-Burner-${VERSION}-Linux.tar.gz" CD-Burner-Linux.tar.gz
 
       - uses: actions/upload-artifact@v4

@@ -86,7 +86,7 @@ jobs:
       - name: Package Linux tarball for Pages
         run: |
           VERSION="$(sed -n 's/^project(Deck VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
-          ./scripts/package_cd_burner_linux.sh build Release "$VERSION"
+          bash scripts/package_cd_burner_linux.sh build Release "$VERSION"
           cp "dist/CD-Burner-${VERSION}-Linux.tar.gz" CD-Burner-Linux-latest.tar.gz
 
       - uses: actions/upload-artifact@v4
@@ -103,12 +103,12 @@ jobs:
       - name: Build Mojave package
         env:
           CASSETTE_SKIP_APP_ICON: "ON"
-        run: ./scripts/package_cd_burner_legacy_mac.sh
+        run: bash scripts/package_cd_burner_legacy_mac.sh
 
       - name: Stage Pages zip
         run: |
-          ./scripts/apply_app_icon.sh "dist/macOS-Legacy/CD Burner.app" Assets/CdBurnerAppIcon.png || true
-          ./scripts/resign_mac_app.sh "dist/macOS-Legacy/CD Burner.app" || true
+          bash scripts/apply_app_icon.sh "dist/macOS-Legacy/CD Burner.app" Assets/CdBurnerAppIcon.png || true
+          bash scripts/resign_mac_app.sh "dist/macOS-Legacy/CD Burner.app" || true
           cp dist/CD-Burner-*-macOS-Mojave.zip CD-Burner-macOS-Mojave-latest.zip
 
       - uses: actions/upload-artifact@v4

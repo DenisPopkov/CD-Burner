@@ -1,6 +1,8 @@
 # Apple platform flags shared by Deck targets (included from CMakeLists.txt).
 
 if(NOT APPLE)
+    function(deck_apply_macos_target_properties target)
+    endfunction()
     return()
 endif()
 
