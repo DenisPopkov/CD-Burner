@@ -300,4 +300,31 @@ RenderResult SideRenderer::renderSide(const MixtapeProject& project,
     return result;
 }
 
+RenderResult SideRenderer::renderClip(const TapeClip& clip,
+                                      CassetteProfile profile,
+                                      const MasteringOptions& mastering,
+                                      float recLevelDb,
+                                      double sampleRate,
+                                      bool captureUnmasteredReference,
+                                      float biasDb)
+{
+    RenderResult result;
+    result.sampleRate = sampleRate;
+
+    profile.hfTamerRatio = juce::jmax(1.05f, profile.hfTamerRatio - biasDb * 0.05f);
+
+    auto processed = processClip(clip, profile, mastering, recLevelDb, sampleRate, captureUnmasteredReference);
+    if (!processed.success)
+    {
+        result.error = processed.error;
+        return result;
+    }
+
+    result.buffer = std::move(processed.mastered);
+    if (captureUnmasteredReference)
+        result.referenceBuffer = std::move(processed.reference);
+    result.success = true;
+    return result;
+}
+
 } // namespace cassette

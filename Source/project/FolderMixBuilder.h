@@ -20,6 +20,8 @@ struct TapeLengthSpec
 {
     juce::String label;
     double minutesPerSide = 45.0;
+    /** When true, @p minutesPerSide is total disc capacity (CD Burner); no Side A/B split. */
+    bool cdDiscMode = false;
 };
 
 /** @p customTotalMinutes is total cassette length (both sides); used only for Custom. */
@@ -101,7 +103,14 @@ public:
     static SideSplitPlan computeSideSplit(const FolderScanResult& scan, double allowedSecPerSide);
 
     static std::vector<CassettePlan> computeMultiCassetteSplit(const FolderScanResult& scan,
-                                                               double allowedSecPerSide);
+                                                               double allowedSecPerSide,
+                                                               bool cdDiscMode = false);
+
+    static juce::String preparedTracksFolderName(const juce::String& projectName,
+                                                 int discIndex,
+                                                 int discCount);
+
+    static juce::String preparedTrackFilename(int trackIndex, const juce::String& title);
 
     static MixtapeProject buildSplitProject(const FolderScanResult& scan,
                                             const juce::String& projectName,

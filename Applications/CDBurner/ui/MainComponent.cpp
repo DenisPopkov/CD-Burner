@@ -6,11 +6,13 @@
 #include "analysis/EssentiaAnalyzer.h"
 #include "dsp/graph/AdaptiveMasteringProcessor.h"
 #include "export/WavExporter.h"
+#include "export/RedBookExporter.h"
 #include "project/SideRenderer.h"
 #include "dsp/AudioConstants.h"
 #include "io/DropPayload.h"
 #include "util/AppLog.h"
 #include "../locale/CdBurnerLocale.h"
+#include "../burn/CdBurnService.h"
 
 namespace cassette
 {
@@ -28,6 +30,7 @@ MainComponent::MainComponent()
                      static_cast<juce::Component*>(&newButton),
                      static_cast<juce::Component*>(&startButton),
                      static_cast<juce::Component*>(&exportButton),
+                     static_cast<juce::Component*>(&burnButton),
                      static_cast<juce::Component*>(&status) })
         addAndMakeVisible(c);
 
@@ -60,13 +63,16 @@ MainComponent::MainComponent()
 
     Theme::styleRecButton(startButton);
     Theme::styleExportButton(exportButton);
+    Theme::styleAccentButton(burnButton);
     Theme::styleNeutralButton(newButton);
     newButton.addListener(this);
     startButton.addListener(this);
     exportButton.addListener(this);
+    burnButton.addListener(this);
     startButton.setEnabled(false);
     newButton.setEnabled(false);
     exportButton.setEnabled(false);
+    burnButton.setEnabled(false);
 
     Theme::applyLabel(status, Theme::bodyFont(), Theme::textSecondary());
 
@@ -77,6 +83,7 @@ MainComponent::MainComponent()
 
     trackListEditor.setVisible(false);
     trackListEditor.setMediaUnitLabel("Disc");
+    trackListEditor.setSingleListMode(true);
     previewDeviceManager.initialiseWithDefaultDevices(0, 2);
     trackListEditor.attachToAudioDevice(previewDeviceManager);
     trackListEditor.onLayoutChanged = [this] {
@@ -118,6 +125,7 @@ void MainComponent::refreshUiText()
     newButton.setButtonText(cdb::tr("btn.new"));
     startButton.setButtonText(cdb::tr("btn.prepare"));
     exportButton.setButtonText(cdb::tr("btn.export_wav"));
+    burnButton.setButtonText(cdb::tr("btn.burn_cd"));
     discSetupPanel.refreshLocalisedText();
     dropHero.refreshLocalisedText();
     trackListEditor.refreshLocalisedText();
@@ -136,10 +144,12 @@ void MainComponent::syncTransportButtonStyles()
                                      newButton.isEnabled());
     Theme::applyTransportButtonStyle(startButton, Theme::TransportButtonStyle::Rec, startButton.isEnabled());
     Theme::applyTransportButtonStyle(exportButton, Theme::TransportButtonStyle::Export, exportButton.isEnabled());
+    Theme::applyTransportButtonStyle(burnButton, Theme::TransportButtonStyle::Rec, burnButton.isEnabled());
 
     newButton.repaint();
     startButton.repaint();
     exportButton.repaint();
+    burnButton.repaint();
 }
 
 void MainComponent::updateWizardState()
@@ -180,6 +190,7 @@ void MainComponent::updateWizardState()
     startButton.setButtonText(cdb::tr("btn.prepare"));
     newButton.setEnabled((hasSource || hasProcessed) && !busy);
     exportButton.setEnabled(!busy && hasProcessed && loadedAudio.has_value());
+    burnButton.setEnabled(!busy && hasProcessed && !preparedDiscTracks.empty());
 
     syncTransportButtonStyles();
 }
@@ -286,6 +297,8 @@ void MainComponent::resized()
     startButton.setBounds(topBar.removeFromLeft(112));
     topBar.removeFromLeft(10);
     exportButton.setBounds(topBar.removeFromRight(124));
+    topBar.removeFromRight(10);
+    burnButton.setBounds(topBar.removeFromRight(112));
 
     if (kRightSidebarW > 0)
     {
@@ -354,6 +367,12 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     {
         if (startButton.isEnabled())
             startButton.triggerClick();
+        return true;
+    }
+    if (mods.isCommandDown() && key.getKeyCode() == 'B')
+    {
+        if (burnButton.isEnabled())
+            burnButton.triggerClick();
         return true;
     }
     if (mods.isCommandDown() && key.getKeyCode() == 'E')
@@ -439,10 +458,13 @@ void MainComponent::resetSession()
     sideADurationSec = 0.0;
     sideBDurationSec = 0.0;
 
+    preparedDiscTracks.clear();
+    preparedActiveDiscIndex = 0;
     preparedTapeLabel = {};
     compareWaveform.clearAll();
     readySummary.setVisible(false);
     exportButton.setEnabled(false);
+    burnButton.setEnabled(false);
 
     discSetupPanel.setMixtapeMode(false);
     discSetupPanel.setTapeFitSummary({}, true);
@@ -458,6 +480,8 @@ void MainComponent::resetSession()
 void MainComponent::invalidatePreparedOutput()
 {
     hasProcessed = false;
+    preparedDiscTracks.clear();
+    preparedActiveDiscIndex = 0;
     preparedTapeLabel = {};
     lastQuality.reset();
     lastProcessedFeatures.reset();
@@ -560,7 +584,8 @@ void MainComponent::loadAudioFile(const juce::File& file)
     sourceAudio.reset();
     hasProcessed = false;
     hasSource = false;
-    preparedTapeLabel = {};
+    preparedDiscTracks.clear();
+    preparedActiveDiscIndex = 0;
     lastQuality.reset();
     lastProcessedFeatures.reset();
     hasSideB = false;
@@ -686,44 +711,46 @@ void MainComponent::startFolderMixBuild()
 
     mixtapeEditor.syncCassettePlan(tape);
     const auto scanCopy = mixtapeEditor.mergedFullScan();
-    const auto fit = mixtapeEditor.computeFullFit(tape);
     const int cassetteCount = mixtapeEditor.getCassetteCount();
-    const auto gapSec = mixtapeEditor.gapBetweenTracksSec();
     std::vector<MixtapeEditController::LayoutSnapshot> cassetteLayouts;
     cassetteLayouts.reserve(static_cast<size_t>(cassetteCount));
     for (int i = 0; i < cassetteCount; ++i)
         cassetteLayouts.push_back(mixtapeEditor.layoutForCassette(i));
     const auto projectName = mixtapePanel.currentFolder().getFileName();
     const juce::File outFolder = mixtapePanel.currentFolder();
-    const auto allowedSec = tape.minutesPerSide * 60.0;
 
     setUiProcessing(true);
     wizardSteps.setPhase(WizardPhase::Preparing);
     setStatus(cassetteCount > 1 ? cdb::trf("status.preparing_discs", cassetteCount)
-                                : cdb::tr("status.preparing_sides"),
+                                : cdb::tr("status.preparing_tracks"),
               ui::Theme::accent());
 
     log("UI: Build mixtape started - " + juce::String(scanCopy.tracks.size()) + " tracks, "
         + juce::String(cassetteCount) + " disc(s), out=" + outFolder.getFullPathName());
 
     worker.enqueue([this,
-                    scanCopy,
                     cassetteLayouts,
-                    gapSec,
                     profile,
                     options,
                     projectName,
                     outFolder,
-                    allowedSec,
-                    fit,
                     cassetteCount]() {
         try
         {
-            ScopedTimer buildTimer("folder-build", projectName + " (" + juce::String(scanCopy.tracks.size()) + " tracks)");
+            ScopedTimer buildTimer("folder-build", projectName + " (" + juce::String(cassetteCount) + " disc(s))");
             const double sampleRate = kProjectSampleRate;
-            const int totalTracks = static_cast<int>(scanCopy.tracks.size());
 
-            const auto trackProgress = [this, totalTracks](int tracksDone, int, const juce::String& title) {
+            std::vector<FolderTrackInfo> allTracks;
+            for (const auto& layout : cassetteLayouts)
+            {
+                for (const auto& t : layout.sideA)
+                    allTracks.push_back(t);
+                for (const auto& t : layout.sideB)
+                    allTracks.push_back(t);
+            }
+            const int totalTracks = static_cast<int>(allTracks.size());
+
+            const auto trackProgress = [this, totalTracks](int tracksDone, const juce::String& title) {
                 const auto msg = "Track " + juce::String(tracksDone) + "/" + juce::String(totalTracks) + ": " + title;
                 const double pct = juce::jlimit(0.0, 0.98, static_cast<double>(tracksDone) / static_cast<double>(totalTracks));
                 juce::MessageManager::callAsync([this, msg, pct]() {
@@ -734,160 +761,126 @@ void MainComponent::startFolderMixBuild()
             };
 
             juce::String workerError;
-            std::shared_ptr<RenderResult> previewA;
-            std::shared_ptr<RenderResult> previewB;
-            juce::File previewSideAFile;
-            juce::File previewSideBFile;
-            CassettePlan previewPlan;
+            std::shared_ptr<RenderResult> previewResult;
+            juce::File previewTrackFile;
+            int globalTrackIndex = 0;
+            std::vector<juce::Array<juce::File>> discTrackFiles(static_cast<size_t>(cassetteCount));
 
-            int trackOffset = 0;
             for (int cassetteIdx = 0; cassetteIdx < cassetteCount && workerError.isEmpty(); ++cassetteIdx)
             {
                 const auto& layout = cassetteLayouts[static_cast<size_t>(cassetteIdx)];
-                const int sideATracks = static_cast<int>(layout.sideA.size());
-                const int sideBTracks = static_cast<int>(layout.sideB.size());
-                const int cassetteTrackCount = sideATracks + sideBTracks;
-
-                auto project = FolderMixBuilder::buildProjectFromSides(layout.sideA,
-                                                                       layout.sideB,
-                                                                       outFolder,
-                                                                       gapSec,
-                                                                       projectName,
-                                                                       profile,
-                                                                       options,
-                                                                       allowedSec);
-
-                const juce::String cassetteLabel = cassetteCount > 1
-                                                       ? projectName + " Disc " + juce::String(cassetteIdx + 1)
-                                                       : projectName;
-
-                const auto sideAProgress = [&, start = trackOffset](int finishedOnSide, int, const juce::String& title) {
-                    trackProgress(start + finishedOnSide, totalTracks, title);
-                };
-
-                const bool captureReference = previewA == nullptr;
-                auto renderedA = SideRenderer::renderSide(project, false, sampleRate, false, sideAProgress, captureReference);
-                if (!renderedA.success)
+                const juce::String preparedFolderName =
+                    FolderMixBuilder::preparedTracksFolderName(projectName, cassetteIdx, cassetteCount);
+                const juce::File preparedDir = outFolder.getChildFile(preparedFolderName);
+                if (!preparedDir.createDirectory())
                 {
-                    workerError = renderedA.error;
+                    workerError = "Failed to create " + preparedDir.getFullPathName();
                     break;
                 }
 
-                juce::File sideAFile = outFolder.getChildFile(cassetteLabel + " Side A.wav");
-                if (!WavExporter::writeWav32Float(sideAFile, renderedA.buffer, renderedA.sampleRate))
-                {
-                    workerError = "Failed to write " + sideAFile.getFileName();
-                    break;
-                }
+                std::vector<FolderTrackInfo> discTracks;
+                discTracks.insert(discTracks.end(), layout.sideA.begin(), layout.sideA.end());
+                discTracks.insert(discTracks.end(), layout.sideB.begin(), layout.sideB.end());
 
-                if (previewA == nullptr)
+                int discTrackNum = 0;
+                for (const auto& track : discTracks)
                 {
-                    previewA = std::make_shared<RenderResult>(std::move(renderedA));
-                    previewSideAFile = sideAFile;
-                    previewPlan.sideAStartTrack = 0;
-                    previewPlan.sideAEndTrack = sideATracks;
-                    previewPlan.sideADurationSec = FolderMixBuilder::sideDurationSec(layout.sideA, gapSec);
-                }
+                    ++globalTrackIndex;
+                    ++discTrackNum;
+                    trackProgress(globalTrackIndex, track.displayName);
 
-                if (sideBTracks > 0)
-                {
-                    const auto sideBProgress = [&, start = trackOffset + sideATracks](int finishedOnSide,
-                                                                                      int,
-                                                                                      const juce::String& title) {
-                        trackProgress(start + finishedOnSide, totalTracks, title);
-                    };
+                    TapeClip clip;
+                    clip.sourceFile = track.file;
+                    clip.displayTitle = track.displayName;
+                    clip.durationSec = track.durationSec;
+                    clip.startTimeSec = 0.0;
+                    clip.trackIndex = globalTrackIndex;
 
-                    auto renderedB = SideRenderer::renderSide(project, true, sampleRate, false, sideBProgress);
-                    if (!renderedB.success)
+                    const bool captureReference = previewResult == nullptr;
+                    auto rendered = SideRenderer::renderClip(clip,
+                                                           profile,
+                                                           options,
+                                                           0.0f,
+                                                           sampleRate,
+                                                           captureReference);
+                    if (!rendered.success)
                     {
-                        workerError = renderedB.error;
+                        workerError = rendered.error;
                         break;
                     }
 
-                    juce::File sideBFile = outFolder.getChildFile(cassetteLabel + " Side B.wav");
-                    if (!WavExporter::writeWav32Float(sideBFile, renderedB.buffer, renderedB.sampleRate))
+                    const auto outFile =
+                        preparedDir.getChildFile(FolderMixBuilder::preparedTrackFilename(discTrackNum, track.displayName));
+                    if (!RedBookExporter::writeRedBookWav(outFile, rendered.buffer, rendered.sampleRate))
                     {
-                        workerError = "Failed to write " + sideBFile.getFileName();
+                        workerError = "Failed to write " + outFile.getFileName();
                         break;
                     }
 
-                    if (previewB == nullptr && cassetteCount == 1)
+                    discTrackFiles[static_cast<size_t>(cassetteIdx)].add(outFile);
+
+                    if (previewResult == nullptr)
                     {
-                        previewB = std::make_shared<RenderResult>(std::move(renderedB));
-                        previewSideBFile = sideBFile;
-                        previewPlan.hasSideB = true;
-                        previewPlan.sideBStartTrack = sideATracks;
-                        previewPlan.sideBEndTrack = cassetteTrackCount;
-                        previewPlan.sideBDurationSec = FolderMixBuilder::sideDurationSec(layout.sideB, gapSec);
+                        previewResult = std::make_shared<RenderResult>(std::move(rendered));
+                        previewTrackFile = outFile;
                     }
                 }
-
-                trackOffset += cassetteTrackCount;
             }
 
             juce::MessageManager::callAsync([this]() { setProgress(0.99); });
 
             juce::MessageManager::callAsync([this,
-                                             previewA,
-                                             previewB,
-                                             scanCopy,
-                                             projectName,
-                                             fit,
-                                             previewPlan,
-                                             previewSideAFile,
-                                             previewSideBFile,
+                                             previewResult,
+                                             previewTrackFile,
                                              workerError,
                                              profile,
-                                             cassetteCount]() mutable {
+                                             cassetteCount,
+                                             discTrackFiles]() mutable {
                 if (workerError.isNotEmpty())
                 {
                     finishProcessing(false, workerError);
                     return;
                 }
 
-                if (previewA == nullptr)
+                if (previewResult == nullptr)
                 {
-                    finishProcessing(false, "No disc output produced");
+                    finishProcessing(false, "No prepared tracks produced");
                     return;
                 }
 
                 mixtapeCassetteCount = cassetteCount;
+                preparedDiscTracks = std::move(discTrackFiles);
+                preparedActiveDiscIndex = 0;
 
-                LoadedAudio sideA;
-                sideA.buffer = std::move(previewA->buffer);
-                sideA.sampleRate = previewA->sampleRate;
-                sideAAudio = std::move(sideA);
-                sideAPath = previewSideAFile;
+                LoadedAudio preview;
+                preview.buffer = std::move(previewResult->buffer);
+                preview.sampleRate = previewResult->sampleRate;
+                sideAAudio = std::move(preview);
+                sideAPath = previewTrackFile;
                 sideADurationSec = sideAAudio->buffer.getNumSamples() / sideAAudio->sampleRate;
-                hasSideB = previewB != nullptr;
+                hasSideB = false;
+                sideBAudio.reset();
+                sideBPath = juce::File();
+                sideBDurationSec = 0.0;
 
-                if (previewA->referenceBuffer.getNumSamples() > 0)
+                if (previewResult->referenceBuffer.getNumSamples() > 0)
                 {
                     LoadedAudio reference;
-                    reference.buffer = std::move(previewA->referenceBuffer);
-                    reference.sampleRate = previewA->sampleRate;
+                    reference.buffer = std::move(previewResult->referenceBuffer);
+                    reference.sampleRate = previewResult->sampleRate;
                     mixtapeReferenceAudio = std::move(reference);
-                }
-
-                if (hasSideB && previewB != nullptr)
-                {
-                    LoadedAudio sideB;
-                    sideB.buffer = std::move(previewB->buffer);
-                    sideB.sampleRate = previewB->sampleRate;
-                    sideBAudio = std::move(sideB);
-                    sideBPath = previewSideBFile;
-                    sideBDurationSec = sideBAudio->buffer.getNumSamples() / sideBAudio->sampleRate;
                 }
 
                 showMixtapeSide(false);
                 hasProcessed = true;
                 preparedTapeLabel = profile.displayName;
                 exportButton.setEnabled(true);
+                burnButton.setEnabled(!preparedDiscTracks.empty());
 
                 updateReadySummary();
                 const juce::String doneMsg = cassetteCount > 1
-                                                 ? juce::String(cassetteCount) + " discs saved next to your music"
-                                                 : "Side A/B WAV files saved next to your music";
+                                                 ? juce::String(cassetteCount) + " prepared track folders saved next to your music"
+                                                 : cdb::tr("status.prepared_tracks_done");
                 setProgress(1.0);
                 finishProcessing(true, doneMsg);
             });
@@ -979,6 +972,94 @@ bool MainComponent::isInterestedInDrop(const juce::StringArray& files) const
     return isDropPayloadInterested(files);
 }
 
+
+void MainComponent::startCdBurn()
+{
+    if (preparedDiscTracks.empty())
+    {
+        setStatus(cdb::tr("status.prepare_first"), ui::Theme::warnAmber());
+        return;
+    }
+
+    if (isProcessing.load())
+        return;
+
+    const int discIndex = juce::jlimit(0, static_cast<int>(preparedDiscTracks.size()) - 1, preparedActiveDiscIndex);
+    const auto& tracks = preparedDiscTracks[static_cast<size_t>(discIndex)];
+    if (tracks.isEmpty())
+    {
+        setStatus(cdb::tr("status.prepare_first"), ui::Theme::warnAmber());
+        return;
+    }
+
+    auto devices = CdBurnService::listDevices();
+    if (devices.empty())
+    {
+        setStatus(cdb::tr("status.no_burner") + " " + CdBurnService::platformBurnHint(), ui::Theme::warnAmber());
+        return;
+    }
+
+    CdBurnDevice device = devices.front();
+    if (devices.size() > 1)
+    {
+        juce::PopupMenu menu;
+        for (int i = 0; i < static_cast<int>(devices.size()); ++i)
+            menu.addItem(i + 1, devices[static_cast<size_t>(i)].displayName);
+        menu.showMenuAsync(juce::PopupMenu::Options(), [this, devices, tracks, discIndex](int result) {
+            if (result <= 0)
+                return;
+            const auto device = devices[static_cast<size_t>(result - 1)];
+            startCdBurnWithDevice(device, tracks, discIndex);
+        });
+        return;
+    }
+
+    startCdBurnWithDevice(device, tracks, discIndex);
+}
+
+void MainComponent::startCdBurnWithDevice(const CdBurnDevice& device,
+                                          const juce::Array<juce::File>& tracks,
+                                          int discIndex)
+{
+    setUiProcessing(true);
+    setStatus(cdb::tr("status.burning_cd"), ui::Theme::accent());
+
+    worker.enqueue([this, device, tracks, discIndex]() {
+        const auto result = CdBurnService::burnAudioDisc(
+            device,
+            tracks,
+            [this](const CdBurnProgress& progress) {
+                juce::MessageManager::callAsync([this, progress]() {
+                    setProgress(progress.overallPercent);
+                    if (progress.message.isNotEmpty())
+                        setStatus(progress.message, ui::Theme::accent());
+                });
+            });
+
+        juce::MessageManager::callAsync([this, result, discIndex]() {
+            setProgress(1.0);
+            if (result.success)
+            {
+                if (discIndex + 1 < static_cast<int>(preparedDiscTracks.size()))
+                {
+                    preparedActiveDiscIndex = discIndex + 1;
+                    setStatus(cdb::trf("status.burn_disc_done_next", discIndex + 2), ui::Theme::okGreen());
+                }
+                else
+                {
+                    setStatus(cdb::tr("status.burn_complete"), ui::Theme::okGreen());
+                }
+            }
+            else
+            {
+                setStatus(result.error.isNotEmpty() ? result.error : cdb::tr("status.burn_failed"),
+                          ui::Theme::failRed());
+            }
+            setUiProcessing(false);
+            syncLayout();
+        });
+    });
+}
 
 void MainComponent::exportWav()
 {
@@ -1082,6 +1163,11 @@ void MainComponent::buttonClicked(juce::Button* button)
             startFolderMixBuild();
         else
             startProcessing();
+        return;
+    }
+    if (button == &burnButton)
+    {
+        startCdBurn();
         return;
     }
     if (button == &exportButton)

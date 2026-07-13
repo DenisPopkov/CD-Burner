@@ -25,6 +25,8 @@ public:
     void setTapeSpec(const TapeLengthSpec& tape);
     /** Label for multi-unit selector items, e.g. "Cassette" (default) or "Disc". */
     void setMediaUnitLabel(const juce::String& label);
+    /** CD mode: one track list, no Side A/B columns. */
+    void setSingleListMode(bool enabled);
     void rebalanceSides();
     void refresh();
     void setLoading(bool loading);
@@ -197,6 +199,7 @@ private:
     MixtapeEditController* controller = nullptr;
     TapeLengthSpec tape;
     juce::String mediaUnitLabel { "Cassette" };
+    bool singleListMode = false;
     bool dragActive = false;
     int dragSourceSide = -1;
     int dragSourceRow = -1;

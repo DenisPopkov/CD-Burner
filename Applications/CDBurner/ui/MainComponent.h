@@ -18,6 +18,7 @@
 #include "TrackListEditor.h"
 #include "analysis/PerceptualQualityGuard.h"
 #include "io/DropPayload.h"
+#include "../burn/CdBurnService.h"
 
 namespace cassette
 {
@@ -57,6 +58,10 @@ private:
     void scanMixFolder(const juce::File& folder);
     void refreshFolderFitLabel();
     void exportWav();
+    void startCdBurn();
+    void startCdBurnWithDevice(const CdBurnDevice& device,
+                               const juce::Array<juce::File>& tracks,
+                               int discIndex);
     void pickImportFolder();
     void resetSession();
     void invalidatePreparedOutput();
@@ -85,6 +90,7 @@ private:
     juce::TextButton newButton { "New" };
     juce::TextButton startButton { "Prepare" };
     juce::TextButton exportButton { "Export WAV" };
+    juce::TextButton burnButton { "Burn CD" };
 
     CompareWaveformDisplay compareWaveform;
     juce::AudioDeviceManager previewDeviceManager;
@@ -125,6 +131,8 @@ private:
     bool hasSideB = false;
     int mixtapeCassetteCount = 1;
     juce::String preparedTapeLabel;
+    std::vector<juce::Array<juce::File>> preparedDiscTracks;
+    int preparedActiveDiscIndex = 0;
 
     AnalysisWorker worker;
     std::atomic<bool> isProcessing { false };

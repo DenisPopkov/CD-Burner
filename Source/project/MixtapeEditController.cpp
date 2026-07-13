@@ -136,15 +136,23 @@ void MixtapeEditController::loadFromScan(const FolderScanResult& scan, const Fol
     if (fit.cassettes.empty())
     {
         cassetteLayouts.push_back(layoutFromPlan(scan, CassettePlan {}));
-        const int split = juce::jlimit(0, static_cast<int>(scan.tracks.size()), fit.split.sideAEndIndex);
         cassetteLayouts[0].sideA.clear();
         cassetteLayouts[0].sideB.clear();
-        for (int i = 0; i < static_cast<int>(scan.tracks.size()); ++i)
+        if (fit.tape.cdDiscMode)
         {
-            if (i < split)
-                cassetteLayouts[0].sideA.push_back(scan.tracks[static_cast<size_t>(i)]);
-            else
-                cassetteLayouts[0].sideB.push_back(scan.tracks[static_cast<size_t>(i)]);
+            for (const auto& t : scan.tracks)
+                cassetteLayouts[0].sideA.push_back(t);
+        }
+        else
+        {
+            const int split = juce::jlimit(0, static_cast<int>(scan.tracks.size()), fit.split.sideAEndIndex);
+            for (int i = 0; i < static_cast<int>(scan.tracks.size()); ++i)
+            {
+                if (i < split)
+                    cassetteLayouts[0].sideA.push_back(scan.tracks[static_cast<size_t>(i)]);
+                else
+                    cassetteLayouts[0].sideB.push_back(scan.tracks[static_cast<size_t>(i)]);
+            }
         }
     }
     else
@@ -260,6 +268,13 @@ MixtapeProject MixtapeEditController::buildProjectForCassette(int cassetteIndex,
 bool MixtapeEditController::hasSideOverflow(const TapeLengthSpec& tape) const
 {
     const auto fit = computeFit(tape);
+    if (tape.cdDiscMode)
+    {
+        const double used = FolderMixBuilder::sideDurationSec(sideATracks, gapSec)
+                            + FolderMixBuilder::sideDurationSec(sideBTracks, gapSec);
+        return used > fit.allowedSec + 2.0 * gapSec + 1.0;
+    }
+
     return FolderMixBuilder::sideDurationSec(sideATracks, gapSec) > fit.allowedSec + 2.0 * gapSec + 1.0
            || FolderMixBuilder::sideDurationSec(sideBTracks, gapSec) > fit.allowedSec + 2.0 * gapSec + 1.0;
 }
@@ -419,13 +434,21 @@ void MixtapeEditController::rebalance(const TapeLengthSpec& tape)
     if (fit.cassettes.empty())
     {
         LayoutSnapshot snap;
-        const int split = juce::jlimit(0, static_cast<int>(scan.tracks.size()), fit.split.sideAEndIndex);
-        for (int i = 0; i < static_cast<int>(scan.tracks.size()); ++i)
+        if (fit.tape.cdDiscMode)
         {
-            if (i < split)
-                snap.sideA.push_back(scan.tracks[static_cast<size_t>(i)]);
-            else
-                snap.sideB.push_back(scan.tracks[static_cast<size_t>(i)]);
+            for (const auto& t : scan.tracks)
+                snap.sideA.push_back(t);
+        }
+        else
+        {
+            const int split = juce::jlimit(0, static_cast<int>(scan.tracks.size()), fit.split.sideAEndIndex);
+            for (int i = 0; i < static_cast<int>(scan.tracks.size()); ++i)
+            {
+                if (i < split)
+                    snap.sideA.push_back(scan.tracks[static_cast<size_t>(i)]);
+                else
+                    snap.sideB.push_back(scan.tracks[static_cast<size_t>(i)]);
+            }
         }
         cassetteLayouts.push_back(std::move(snap));
     }

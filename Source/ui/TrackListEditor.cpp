@@ -676,24 +676,32 @@ void TrackListEditor::SideList::mouseDrag(const juce::MouseEvent& e)
     owner.crossDropSide = -1;
     owner.crossDropRow = -1;
 
-    auto& other = sideIndex == 0 ? owner.sideBList : owner.sideAList;
-    const auto otherPos = e.getEventRelativeTo(&other).getPosition();
-    if (other.getLocalBounds().contains(otherPos))
+    if (!owner.singleListMode)
     {
-        const int otherSide = sideIndex == 0 ? 1 : 0;
-        owner.crossDropSide = otherSide;
-        owner.crossDropRow = other.rowAtY(otherPos.y);
-        other.dropInsertRow = owner.crossDropRow;
-    }
-    else
-    {
-        other.dropInsertRow = -1;
+        auto& other = sideIndex == 0 ? owner.sideBList : owner.sideAList;
+        const auto otherPos = e.getEventRelativeTo(&other).getPosition();
+        if (other.getLocalBounds().contains(otherPos))
+        {
+            const int otherSide = sideIndex == 0 ? 1 : 0;
+            owner.crossDropSide = otherSide;
+            owner.crossDropRow = other.rowAtY(otherPos.y);
+            other.dropInsertRow = owner.crossDropRow;
+        }
+        else
+        {
+            other.dropInsertRow = -1;
+        }
+
+        const bool trashHover = owner.trashContains(e.getEventRelativeTo(&owner).getPosition());
+        owner.trashZone.setActive(true, trashHover);
+        repaint();
+        other.repaint();
+        return;
     }
 
     const bool trashHover = owner.trashContains(e.getEventRelativeTo(&owner).getPosition());
     owner.trashZone.setActive(true, trashHover);
     repaint();
-    other.repaint();
 }
 
 void TrackListEditor::SideList::mouseUp(const juce::MouseEvent& e)
@@ -734,7 +742,7 @@ void TrackListEditor::SideList::mouseUp(const juce::MouseEvent& e)
         if (target != dragSourceRow)
             changed = owner.controller->reorderWithinSide(sideIndex, dragSourceRow, target);
     }
-    else
+    else if (!owner.singleListMode)
     {
         auto& other = sideIndex == 0 ? owner.sideBList : owner.sideAList;
         const auto otherPos = e.getEventRelativeTo(&other).getPosition();
@@ -965,11 +973,12 @@ void TrackListEditor::setLoading(bool loadingIn)
     loadingLabel.setVisible(loading);
     const bool showEditor = !loading;
     sideALabel.setVisible(showEditor);
-    sideBLabel.setVisible(showEditor);
+    sideBLabel.setVisible(showEditor && !singleListMode);
     sideAViewport.setVisible(showEditor);
-    sideBViewport.setVisible(showEditor);
+    sideBViewport.setVisible(showEditor && !singleListMode);
     selectTracksButton.setEnabled(showEditor);
-    rebalanceSidesButton.setEnabled(showEditor && controller != nullptr
+    rebalanceSidesButton.setVisible(showEditor && !singleListMode);
+    rebalanceSidesButton.setEnabled(showEditor && !singleListMode && controller != nullptr
                                     && (!controller->sideA().empty() || !controller->sideB().empty()));
     deleteSelectedButton.setEnabled(showEditor && selectionMode && totalCheckedCount() > 0);
     cassetteSelector.setEnabled(showEditor);
@@ -1002,6 +1011,12 @@ void TrackListEditor::setTapeSpec(const TapeLengthSpec& tapeIn)
 void TrackListEditor::setMediaUnitLabel(const juce::String& label)
 {
     mediaUnitLabel = label.isNotEmpty() ? label : juce::String("Cassette");
+    refresh();
+}
+
+void TrackListEditor::setSingleListMode(bool enabled)
+{
+    singleListMode = enabled;
     refresh();
 }
 
@@ -1292,26 +1307,37 @@ void TrackListEditor::refresh()
     const auto accent = sideAccentColour();
     const auto sideHeader = [&](int sideIndex) {
         if (controller == nullptr)
-            return sideIndex == 0 ? tr("track.side_a") : tr("track.side_b");
+            return singleListMode ? mediaUnitLabel
+                                  : (sideIndex == 0 ? tr("track.side_a") : tr("track.side_b"));
 
         const auto& tracks = sideIndex == 0 ? controller->sideA() : controller->sideB();
-        const double used = FolderMixBuilder::sideDurationSec(tracks, controller->gapBetweenTracksSec());
+        const double used = singleListMode && sideIndex == 0
+                                ? FolderMixBuilder::sideDurationSec(controller->sideA(), controller->gapBetweenTracksSec())
+                                  + FolderMixBuilder::sideDurationSec(controller->sideB(), controller->gapBetweenTracksSec())
+                                : FolderMixBuilder::sideDurationSec(tracks, controller->gapBetweenTracksSec());
         const double cap = tape.minutesPerSide * 60.0;
-        const auto side = sideIndex == 0 ? tr("track.side_a") : tr("track.side_b");
+        const auto label = singleListMode ? mediaUnitLabel
+                                          : (sideIndex == 0 ? tr("track.side_a") : tr("track.side_b"));
         const bool overflow = used > cap + controller->gapBetweenTracksSec() * 2.0 + 1.0;
-        return side + "  " + juce::String(tracks.size()) + " " + tr("track.tracks") + "  "
+        return label + "  " + juce::String(singleListMode ? controller->sideA().size() + controller->sideB().size()
+                                                            : tracks.size())
+               + " " + tr("track.tracks") + "  "
                + FolderMixBuilder::formatDuration(used) + " / " + FolderMixBuilder::formatDuration(cap)
                + (overflow ? "  " + tr("track.overflow") : "");
     };
 
     sideALabel.setText(sideHeader(0), juce::dontSendNotification);
-    sideBLabel.setText(sideHeader(1), juce::dontSendNotification);
+    if (!singleListMode)
+        sideBLabel.setText(sideHeader(1), juce::dontSendNotification);
     sideALabel.setColour(juce::Label::textColourId, accent);
-    sideBLabel.setColour(juce::Label::textColourId, accent);
+    if (!singleListMode)
+        sideBLabel.setColour(juce::Label::textColourId, accent);
 
     sideAList.refresh();
-    sideBList.refresh();
-    rebalanceSidesButton.setEnabled(!loading && controller != nullptr
+    if (!singleListMode)
+        sideBList.refresh();
+    rebalanceSidesButton.setVisible(!loading && !singleListMode);
+    rebalanceSidesButton.setEnabled(!loading && !singleListMode && controller != nullptr
                                     && (!controller->sideA().empty() || !controller->sideB().empty()));
     validatePlaybackState();
     resized();
@@ -1341,7 +1367,8 @@ void TrackListEditor::resized()
 
     auto footer = area.removeFromBottom(kFooterH);
     selectTracksButton.setBounds(footer.removeFromLeft(130).reduced(0, 6));
-    rebalanceSidesButton.setBounds(footer.removeFromLeft(156).reduced(0, 6));
+    if (!singleListMode)
+        rebalanceSidesButton.setBounds(footer.removeFromLeft(156).reduced(0, 6));
     if (selectionMode)
         deleteSelectedButton.setBounds(footer.removeFromLeft(180).reduced(0, 6));
 
@@ -1353,23 +1380,29 @@ void TrackListEditor::resized()
     }
 
     auto header = area.removeFromTop(20);
-    const int gap = 10;
-    const int colW = (header.getWidth() - gap) / 2;
+    const int gap = singleListMode ? 0 : 10;
+    const int colW = singleListMode ? header.getWidth() : (header.getWidth() - gap) / 2;
     sideALabel.setBounds(header.getX() + kSideHeaderInset,
                          header.getY(),
                          colW - kSideHeaderInset,
                          header.getHeight());
-    sideBLabel.setBounds(header.getX() + colW + gap + kSideHeaderInset,
-                         header.getY(),
-                         colW - kSideHeaderInset,
-                         header.getHeight());
+    if (!singleListMode)
+    {
+        sideBLabel.setBounds(header.getX() + colW + gap + kSideHeaderInset,
+                             header.getY(),
+                             colW - kSideHeaderInset,
+                             header.getHeight());
+    }
     area.removeFromTop(4);
 
     const int listH = area.getHeight();
     sideAViewport.setBounds(area.getX(), area.getY(), colW, listH);
-    sideBViewport.setBounds(area.getX() + colW + gap, area.getY(), colW, listH);
     sideAList.setSize(colW, sideAList.getContentHeight(listH));
-    sideBList.setSize(colW, sideBList.getContentHeight(listH));
+    if (!singleListMode)
+    {
+        sideBViewport.setBounds(area.getX() + colW + gap, area.getY(), colW, listH);
+        sideBList.setSize(colW, sideBList.getContentHeight(listH));
+    }
 }
 
 void TrackListEditor::paint(juce::Graphics& g)

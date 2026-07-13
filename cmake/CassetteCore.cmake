@@ -34,6 +34,7 @@ set(CASSETTE_CORE_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/../Source/audio/PreviewEngine.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../Source/export/PreflightTones.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../Source/export/WavExporter.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../Source/export/RedBookExporter.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../Source/io/AudioFileLoader.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../Source/io/AudioResampler.cpp
 )

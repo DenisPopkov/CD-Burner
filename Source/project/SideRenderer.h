@@ -27,6 +27,14 @@ public:
                                    bool padToMaxTapeLength = true,
                                    ProgressCallback onProgress = {},
                                    bool captureUnmasteredReference = false);
+
+    static RenderResult renderClip(const TapeClip& clip,
+                                   CassetteProfile profile,
+                                   const MasteringOptions& mastering,
+                                   float recLevelDb,
+                                   double sampleRate = 48000.0,
+                                   bool captureUnmasteredReference = false,
+                                   float biasDb = 0.0f);
 };
 
 }

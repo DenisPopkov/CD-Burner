@@ -12,7 +12,8 @@ TapeLengthSpec cdLengthSpec(const juce::String& label, double totalMinutes)
 {
     TapeLengthSpec spec;
     spec.label = label;
-    spec.minutesPerSide = totalMinutes * 0.5;
+    spec.minutesPerSide = totalMinutes;
+    spec.cdDiscMode = true;
     return spec;
 }
 
@@ -75,7 +76,7 @@ void DiscSetupPanel::refreshLocalisedText()
     lengthBtnCd80.setTooltip({});
     discLengthLabel.setText(cdb::tr("disc.length"), juce::dontSendNotification);
     if (!mainScreenMode)
-        prepareButton.setButtonText(mixtapeMode ? cdb::tr("btn.build_sides") : cdb::tr("btn.prepare"));
+        prepareButton.setButtonText(mixtapeMode ? cdb::tr("btn.prepare") : cdb::tr("btn.prepare"));
     refreshLengthSegmentStyles();
     repaint();
 }
@@ -155,7 +156,7 @@ void DiscSetupPanel::setMixtapeMode(bool mixtape)
     discFitLabel.setVisible(false);
     updateLengthControlPresentation();
     if (!mainScreenMode)
-        prepareButton.setButtonText(mixtape ? cdb::tr("btn.build_sides") : cdb::tr("btn.prepare"));
+        prepareButton.setButtonText(cdb::tr("btn.prepare"));
     if (!mixtape)
         discFitLabel.setText({}, juce::dontSendNotification);
     resized();

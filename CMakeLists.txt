@@ -196,6 +196,7 @@ target_sources(CDBurner PRIVATE
     Applications/CDBurner/ui/MainComponent.cpp
     Applications/CDBurner/ui/DiscSetupPanel.cpp
     Applications/CDBurner/locale/CdBurnerLocale.cpp
+    Applications/CDBurner/burn/CdBurnService.cpp
     Source/ui/MixtapeBuilderPanel.cpp
     Source/ui/AudioDropTarget.cpp
     Source/ui/CompareWaveformDisplay.cpp
@@ -213,6 +214,7 @@ target_include_directories(CDBurner PRIVATE
     Applications/CDBurner
     Applications/CDBurner/ui
     Applications/CDBurner/locale
+    Applications/CDBurner/burn
     Source
     Source/io
     Source/threading
@@ -236,6 +238,15 @@ target_link_libraries(CDBurner PRIVATE
 
 deck_apply_macos_target_properties(CDBurner)
 juce_generate_juce_header(CDBurner)
+
+if(APPLE)
+    target_sources(CDBurner PRIVATE Applications/CDBurner/burn/CdBurnService_mac.cpp)
+elseif(WIN32)
+    target_sources(CDBurner PRIVATE Applications/CDBurner/burn/CdBurnService_win.cpp)
+    target_link_libraries(CDBurner PRIVATE ole32 oleaut32 uuid)
+elseif(UNIX)
+    target_sources(CDBurner PRIVATE Applications/CDBurner/burn/CdBurnService_linux.cpp)
+endif()
 
 if(APPLE)
     if(NOT CASSETTE_SKIP_APP_ICON)

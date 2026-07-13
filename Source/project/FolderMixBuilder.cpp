@@ -14,7 +14,11 @@ namespace
 bool isExportedSideWav(const juce::File& file)
 {
     const auto name = file.getFileName();
-    return name.endsWithIgnoreCase(" Side A.wav") || name.endsWithIgnoreCase(" Side B.wav");
+    if (name.endsWithIgnoreCase(" Side A.wav") || name.endsWithIgnoreCase(" Side B.wav"))
+        return true;
+
+    const auto parentName = file.getParentDirectory().getFileName();
+    return parentName.endsWithIgnoreCase(" prepared");
 }
 
 double durationRangeSec(const FolderScanResult& scan, int beginIndex, int endIndex)
@@ -133,6 +137,18 @@ juce::String FolderFitReport::summary() const
 {
     const auto req = FolderMixBuilder::formatDuration(requiredSec);
     const auto lim = FolderMixBuilder::formatDuration(allowedSec);
+
+    if (tape.cdDiscMode)
+    {
+        if (!fits)
+            return juce::String(trackCount) + " tracks - a single track exceeds " + lim + " disc length";
+
+        if (cassetteCount > 1)
+            return juce::String(trackCount) + " tracks, " + req + " - " + juce::String(cassetteCount)
+                   + " discs (" + tape.label + ", " + lim + " each)";
+
+        return juce::String(trackCount) + " tracks, " + req + " / " + lim + " - fits on " + tape.label;
+    }
 
     if (!fits)
         return juce::String(trackCount) + " tracks - a single track exceeds " + lim + " per side";
@@ -253,7 +269,7 @@ FolderScanResult FolderMixBuilder::scanFolder(const juce::File& folder, double g
 
 SideSplitPlan FolderMixBuilder::computeSideSplit(const FolderScanResult& scan, double allowedSecPerSide)
 {
-    const auto cassettes = computeMultiCassetteSplit(scan, allowedSecPerSide);
+    const auto cassettes = computeMultiCassetteSplit(scan, allowedSecPerSide, false);
     SideSplitPlan plan;
     if (cassettes.empty())
         return plan;
@@ -267,11 +283,12 @@ SideSplitPlan FolderMixBuilder::computeSideSplit(const FolderScanResult& scan, d
 }
 
 std::vector<CassettePlan> FolderMixBuilder::computeMultiCassetteSplit(const FolderScanResult& scan,
-                                                                      double allowedSecPerSide)
+                                                                      double allowedSecPerSide,
+                                                                      bool cdDiscMode)
 {
     std::vector<CassettePlan> cassettes;
     const double cap = juce::jmax(1.0, allowedSecPerSide);
-    const double maxCassetteSec = cap * 2.0;
+    const double maxCassetteSec = cdDiscMode ? cap : cap * 2.0;
     const int n = static_cast<int>(scan.tracks.size());
     int trackIdx = 0;
     int cassetteNum = 1;
@@ -285,7 +302,7 @@ std::vector<CassettePlan> FolderMixBuilder::computeMultiCassetteSplit(const Fold
         plan.cassetteNumber = cassetteNum++;
         plan.sideAStartTrack = trackIdx;
 
-        if (sideFitsCapacity(scan, chunkSec, cap))
+        if (cdDiscMode || sideFitsCapacity(scan, chunkSec, cap))
         {
             plan.sideAEndTrack = chunkEnd;
             plan.sideADurationSec = chunkSec;
@@ -344,7 +361,9 @@ FolderFitReport FolderMixBuilder::analyzeLayout(const FolderScanResult& scan,
     report.allowedSec = tape.minutesPerSide * 60.0;
     report.requiredSec = scan.totalDurationSec;
     report.overOneSideSec = juce::jmax(0.0, report.requiredSec - report.allowedSec);
-    report.overCassetteSec = juce::jmax(0.0, report.requiredSec - 2.0 * report.allowedSec);
+    report.overCassetteSec = tape.cdDiscMode
+                                 ? juce::jmax(0.0, report.requiredSec - report.allowedSec)
+                                 : juce::jmax(0.0, report.requiredSec - 2.0 * report.allowedSec);
     report.fitsOneSide = report.overOneSideSec < 1.0;
     report.fitsOnCassette = report.overCassetteSec < 1.0;
 
@@ -355,27 +374,42 @@ FolderFitReport FolderMixBuilder::analyzeLayout(const FolderScanResult& scan,
             report.fits = false;
     }
 
-    report.cassettes = computeMultiCassetteSplit(scan, report.allowedSec);
+    report.cassettes = computeMultiCassetteSplit(scan, report.allowedSec, tape.cdDiscMode);
     report.cassetteCount = static_cast<int>(report.cassettes.size());
 
-    if (sideAEndIndex < 0)
-        report.split = computeSideSplit(scan, report.allowedSec);
+    if (tape.cdDiscMode)
+    {
+        report.split.sideAEndIndex = report.trackCount;
+        report.split.sideADurationSec = report.requiredSec;
+        report.split.needsSideB = false;
+        report.split.sideBDurationSec = 0.0;
+        report.sideATrackCount = report.trackCount;
+        report.sideBTrackCount = 0;
+
+        const bool discFits = sideFitsCapacity(scan, report.requiredSec, report.allowedSec);
+        report.fits = report.fits && discFits;
+    }
     else
     {
-        const int split = juce::jlimit(0, report.trackCount, sideAEndIndex);
-        report.split.sideAEndIndex = split;
-        report.split.sideADurationSec = durationRangeSec(scan, 0, split);
-        report.split.needsSideB = split < report.trackCount;
-        report.split.sideBDurationSec = durationRangeSec(scan, split, report.trackCount);
+        if (sideAEndIndex < 0)
+            report.split = computeSideSplit(scan, report.allowedSec);
+        else
+        {
+            const int split = juce::jlimit(0, report.trackCount, sideAEndIndex);
+            report.split.sideAEndIndex = split;
+            report.split.sideADurationSec = durationRangeSec(scan, 0, split);
+            report.split.needsSideB = split < report.trackCount;
+            report.split.sideBDurationSec = durationRangeSec(scan, split, report.trackCount);
+        }
+
+        report.sideATrackCount = report.split.sideAEndIndex;
+        report.sideBTrackCount = report.trackCount - report.sideATrackCount;
+
+        const bool sideAFits = sideFitsCapacity(scan, report.split.sideADurationSec, report.allowedSec);
+        const bool sideBFits = !report.split.needsSideB
+                               || sideFitsCapacity(scan, report.split.sideBDurationSec, report.allowedSec);
+        report.fits = report.fits && sideAFits && sideBFits;
     }
-
-    report.sideATrackCount = report.split.sideAEndIndex;
-    report.sideBTrackCount = report.trackCount - report.sideATrackCount;
-
-    const bool sideAFits = sideFitsCapacity(scan, report.split.sideADurationSec, report.allowedSec);
-    const bool sideBFits = !report.split.needsSideB
-                           || sideFitsCapacity(scan, report.split.sideBDurationSec, report.allowedSec);
-    report.fits = report.fits && sideAFits && sideBFits;
     return report;
 }
 
@@ -499,7 +533,7 @@ MixtapeProject FolderMixBuilder::buildSplitProject(const FolderScanResult& scan,
                                                    const MasteringOptions& mastering,
                                                    double allowedSecPerSide)
 {
-    const auto cassettes = computeMultiCassetteSplit(scan, allowedSecPerSide);
+    const auto cassettes = computeMultiCassetteSplit(scan, allowedSecPerSide, false);
     if (cassettes.empty())
         return {};
 
@@ -518,6 +552,21 @@ MixtapeProject FolderMixBuilder::buildSequentialProject(const FolderScanResult& 
 {
     const double cap = juce::jmax(scan.totalDurationSec + 60.0, 30.0 * 60.0);
     return buildSplitProject(scan, projectName, std::move(profile), mastering, cap);
+}
+
+juce::String FolderMixBuilder::preparedTracksFolderName(const juce::String& projectName,
+                                                        int discIndex,
+                                                        int discCount)
+{
+    if (discCount > 1)
+        return projectName + " Disc " + juce::String(discIndex + 1) + " prepared";
+    return projectName + " prepared";
+}
+
+juce::String FolderMixBuilder::preparedTrackFilename(int trackIndex, const juce::String& title)
+{
+    const auto safe = title.replaceCharacters(":/\\?*\"<>|", "---------");
+    return juce::String(trackIndex).paddedLeft('0', 2) + " - " + safe + ".wav";
 }
 
 }
