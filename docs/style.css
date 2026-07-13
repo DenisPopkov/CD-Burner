@@ -179,6 +179,7 @@ code {
 .hero {
   padding: 72px 0 56px;
   text-align: center;
+  overflow: visible;
 }
 
 .hero-icon {
@@ -227,13 +228,17 @@ code {
 .hero-shot {
   margin: 40px auto 0;
   max-width: 920px;
+  overflow: visible;
+  padding-inline: 12px;
 }
 
 .hero-shot img {
-  width: 60%;
-  max-width: 528px;
+  display: block;
+  width: 72%;
+  max-width: 634px;
   height: auto;
   margin-inline: auto;
+  object-fit: contain;
 }
 
 /* Sections */
