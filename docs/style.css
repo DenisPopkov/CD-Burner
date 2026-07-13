@@ -227,7 +227,7 @@ code {
 
 .hero-shot {
   margin: 40px auto 0;
-  max-width: 920px;
+  max-width: 1120px;
   overflow: visible;
   padding-inline: 12px;
 }
@@ -235,7 +235,7 @@ code {
 .hero-shot img {
   display: block;
   width: 100%;
-  max-width: 906px;
+  max-width: 1087px;
   height: auto;
   margin-inline: auto;
   object-fit: contain;
