@@ -310,6 +310,17 @@
         return locale.startsWith("ru") ? "ru" : "en";
       }
 
+      function detectTelegram() {
+        const ua = navigator.userAgent || "";
+        return /Telegram/i.test(ua)
+          || !!window.TelegramWebviewProxy
+          || !!(window.Telegram && window.Telegram.WebView);
+      }
+
+      if (detectTelegram()) {
+        document.documentElement.classList.add("is-telegram");
+      }
+
       applyLanguage(detectLanguage());
       highlightDownloadPlatform();
     })();

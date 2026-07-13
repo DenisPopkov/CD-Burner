@@ -14,6 +14,7 @@
   --shadow: 0 12px 40px rgba(66, 65, 73, 0.12);
   --radius: 12px;
   --max-width: 1080px;
+  --safe-area-top: env(safe-area-inset-top, 0px);
 }
 
 *,
@@ -74,6 +75,7 @@ code {
   background: rgba(242, 241, 246, 0.92);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border-light);
+  padding-top: var(--safe-area-top);
 }
 
 .site-nav .container {
@@ -81,7 +83,14 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
+  min-height: 56px;
   padding-block: 14px;
+}
+
+/* Telegram in-app browser: sticky headers leave a gap under TG chrome */
+html.is-telegram .site-nav {
+  position: static;
+  padding-top: 0;
 }
 
 .brand {
@@ -589,12 +598,28 @@ section {
     width: min(var(--max-width), calc(100% - 32px));
   }
 
+  .site-nav .container {
+    gap: 14px;
+    min-height: 56px;
+    padding-block: 10px;
+  }
+
+  .brand {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .nav-actions {
+    flex: 0 0 auto;
+    gap: 8px;
+  }
+
   .nav-links {
     display: none;
   }
 
-  .nav-actions {
-    gap: 8px;
+  .btn-small {
+    padding-inline: 14px;
   }
 
   .feature-grid {
