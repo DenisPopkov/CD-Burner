@@ -110,6 +110,10 @@ public:
                                                  int discIndex,
                                                  int discCount);
 
+    /** Strip leading track indexes ("01 - ", "01.", "01 ") so names match CD-rip style. */
+    static juce::String cleanTrackTitle(const juce::String& title);
+
+    /** Filename like "01 - Title.wav" (Red Book / ExactAudioCopy style). */
     static juce::String preparedTrackFilename(int trackIndex, const juce::String& title);
 
     static MixtapeProject buildSplitProject(const FolderScanResult& scan,

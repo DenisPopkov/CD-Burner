@@ -3,21 +3,25 @@
 #include "ui/look/CassetteLook.h"
 #include "ui/UiTheme.h"
 #include "util/AppLog.h"
+#include "util/CrashReporter.h"
 
 class CdBurnerApplication : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "CD Burner"; }
-    const juce::String getApplicationVersion() override { return "0.1.0"; }
+    const juce::String getApplicationVersion() override { return "0.2.0"; }
     bool moreThanOneInstanceAllowed() override { return true; }
 
     void initialise(const juce::String&) override
     {
+        cassette::installCrashReporting(getApplicationName());
         cassette::initLogging();
+        cassette::crashBreadcrumb("Application initialise");
         cassette::ui::Theme::applyCdBurnerPalette();
         lookAndFeel = std::make_unique<cassette::CassetteLook>();
         juce::Desktop::getInstance().setDefaultLookAndFeel(lookAndFeel.get());
         mainWindow.reset(new MainWindow(getApplicationName()));
+        cassette::crashBreadcrumb("Main window ready");
     }
 
     void shutdown() override

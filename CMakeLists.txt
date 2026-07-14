@@ -197,6 +197,7 @@ target_sources(CDBurner PRIVATE
     Applications/CDBurner/ui/DiscSetupPanel.cpp
     Applications/CDBurner/locale/CdBurnerLocale.cpp
     Applications/CDBurner/burn/CdBurnService.cpp
+    Source/util/CrashReporter.cpp
     Source/ui/MixtapeBuilderPanel.cpp
     Source/ui/AudioDropTarget.cpp
     Source/ui/CompareWaveformDisplay.cpp
@@ -243,7 +244,7 @@ if(APPLE)
     target_sources(CDBurner PRIVATE Applications/CDBurner/burn/CdBurnService_mac.cpp)
 elseif(WIN32)
     target_sources(CDBurner PRIVATE Applications/CDBurner/burn/CdBurnService_win.cpp)
-    target_link_libraries(CDBurner PRIVATE ole32 oleaut32 uuid)
+    target_link_libraries(CDBurner PRIVATE ole32 oleaut32 uuid dbghelp)
 elseif(UNIX)
     target_sources(CDBurner PRIVATE Applications/CDBurner/burn/CdBurnService_linux.cpp)
 endif()

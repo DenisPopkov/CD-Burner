@@ -563,9 +563,44 @@ juce::String FolderMixBuilder::preparedTracksFolderName(const juce::String& proj
     return projectName + " prepared";
 }
 
+juce::String FolderMixBuilder::cleanTrackTitle(const juce::String& title)
+{
+    auto cleaned = title.trim();
+    // Repeatedly strip "01 - ", "01.", "01_", "01 " style prefixes.
+    for (int pass = 0; pass < 3; ++pass)
+    {
+        int i = 0;
+        while (i < cleaned.length() && juce::CharacterFunctions::isDigit(cleaned[i]))
+            ++i;
+        if (i == 0)
+            break;
+
+        auto rest = cleaned.substring(i).trimStart();
+        if (rest.isEmpty())
+            break;
+
+        if (rest.startsWithChar('-') || rest.startsWithChar('.') || rest.startsWithChar('_')
+            || rest.startsWith("–") || rest.startsWith("—"))
+        {
+            rest = rest.substring(1).trimStart();
+        }
+
+        if (rest == cleaned)
+            break;
+        cleaned = rest;
+    }
+
+    return cleaned.isNotEmpty() ? cleaned : title.trim();
+}
+
 juce::String FolderMixBuilder::preparedTrackFilename(int trackIndex, const juce::String& title)
 {
-    const auto safe = title.replaceCharacters(":/\\?*\"<>|", "---------");
+    auto safe = cleanTrackTitle(title);
+    safe = safe.replaceCharacters(":/\\?*\"<>|", "---------").trim();
+    while (safe.contains("  "))
+        safe = safe.replace("  ", " ");
+    if (safe.isEmpty())
+        safe = "Track " + juce::String(trackIndex);
     return juce::String(trackIndex).paddedLeft('0', 2) + " - " + safe + ".wav";
 }
 

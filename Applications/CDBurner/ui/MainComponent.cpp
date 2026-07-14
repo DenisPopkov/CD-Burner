@@ -13,6 +13,7 @@
 #include "util/AppLog.h"
 #include "../locale/CdBurnerLocale.h"
 #include "../burn/CdBurnService.h"
+#include "util/CrashReporter.h"
 
 namespace cassette
 {
@@ -725,6 +726,9 @@ void MainComponent::startFolderMixBuild()
                                 : cdb::tr("status.preparing_tracks"),
               ui::Theme::accent());
 
+    crashBreadcrumb("Prepare started: " + juce::String(scanCopy.tracks.size()) + " tracks, "
+                    + juce::String(cassetteCount) + " disc(s)");
+
     log("UI: Build mixtape started - " + juce::String(scanCopy.tracks.size()) + " tracks, "
         + juce::String(cassetteCount) + " disc(s), out=" + outFolder.getFullPathName());
 
@@ -772,7 +776,9 @@ void MainComponent::startFolderMixBuild()
                 const juce::String preparedFolderName =
                     FolderMixBuilder::preparedTracksFolderName(projectName, cassetteIdx, cassetteCount);
                 const juce::File preparedDir = outFolder.getChildFile(preparedFolderName);
-                if (!preparedDir.createDirectory())
+                if (preparedDir.isDirectory())
+                    RedBookExporter::clearPreparedDirectory(preparedDir);
+                if (!preparedDir.createDirectory() && !preparedDir.isDirectory())
                 {
                     workerError = "Failed to create " + preparedDir.getFullPathName();
                     break;
@@ -782,16 +788,20 @@ void MainComponent::startFolderMixBuild()
                 discTracks.insert(discTracks.end(), layout.sideA.begin(), layout.sideA.end());
                 discTracks.insert(discTracks.end(), layout.sideB.begin(), layout.sideB.end());
 
+                std::vector<RedBookTrackInfo> redBookTracks;
+                redBookTracks.reserve(discTracks.size());
+
                 int discTrackNum = 0;
                 for (const auto& track : discTracks)
                 {
                     ++globalTrackIndex;
                     ++discTrackNum;
-                    trackProgress(globalTrackIndex, track.displayName);
+                    const auto cleanTitle = FolderMixBuilder::cleanTrackTitle(track.displayName);
+                    trackProgress(globalTrackIndex, cleanTitle);
 
                     TapeClip clip;
                     clip.sourceFile = track.file;
-                    clip.displayTitle = track.displayName;
+                    clip.displayTitle = cleanTitle;
                     clip.durationSec = track.durationSec;
                     clip.startTimeSec = 0.0;
                     clip.trackIndex = globalTrackIndex;
@@ -810,13 +820,20 @@ void MainComponent::startFolderMixBuild()
                     }
 
                     const auto outFile =
-                        preparedDir.getChildFile(FolderMixBuilder::preparedTrackFilename(discTrackNum, track.displayName));
+                        preparedDir.getChildFile(FolderMixBuilder::preparedTrackFilename(discTrackNum, cleanTitle));
                     if (!RedBookExporter::writeRedBookWav(outFile, rendered.buffer, rendered.sampleRate))
                     {
                         workerError = "Failed to write " + outFile.getFileName();
                         break;
                     }
 
+                    RedBookTrackInfo info;
+                    info.file = outFile;
+                    info.title = cleanTitle;
+                    info.durationSec = track.durationSec;
+                    if (rendered.sampleRate > 0.0 && rendered.buffer.getNumSamples() > 0)
+                        info.durationSec = rendered.buffer.getNumSamples() / rendered.sampleRate;
+                    redBookTracks.push_back(std::move(info));
                     discTrackFiles[static_cast<size_t>(cassetteIdx)].add(outFile);
 
                     if (previewResult == nullptr)
@@ -825,6 +842,27 @@ void MainComponent::startFolderMixBuild()
                         previewTrackFile = outFile;
                     }
                 }
+
+                if (workerError.isNotEmpty())
+                    break;
+
+                const juce::String albumTitle = cassetteCount > 1
+                                                   ? projectName + " Disc " + juce::String(cassetteIdx + 1)
+                                                   : projectName;
+                const juce::String artist; // unknown unless metadata exists
+                const auto cueFile = preparedDir.getChildFile(albumTitle + ".cue");
+                const auto m3uFile = preparedDir.getChildFile(albumTitle + ".m3u");
+                if (!RedBookExporter::writeCueSheet(cueFile, albumTitle, artist, redBookTracks))
+                {
+                    workerError = "Failed to write " + cueFile.getFileName();
+                    break;
+                }
+                if (!RedBookExporter::writeM3uPlaylist(m3uFile, artist, redBookTracks))
+                {
+                    workerError = "Failed to write " + m3uFile.getFileName();
+                    break;
+                }
+                RedBookExporter::copyCoverArtIfPresent(outFolder, preparedDir);
             }
 
             juce::MessageManager::callAsync([this]() { setProgress(0.99); });
@@ -836,63 +874,87 @@ void MainComponent::startFolderMixBuild()
                                              profile,
                                              cassetteCount,
                                              discTrackFiles]() mutable {
-                if (workerError.isNotEmpty())
+                crashBreadcrumb("Prepare finished on UI thread");
+                try
                 {
-                    finishProcessing(false, workerError);
-                    return;
-                }
+                    if (workerError.isNotEmpty())
+                    {
+                        crashBreadcrumb("Prepare failed: " + workerError);
+                        finishProcessing(false, workerError);
+                        return;
+                    }
 
-                if (previewResult == nullptr)
+                    if (previewResult == nullptr)
+                    {
+                        crashBreadcrumb("Prepare produced no tracks");
+                        finishProcessing(false, "No prepared tracks produced");
+                        return;
+                    }
+
+                    mixtapeCassetteCount = cassetteCount;
+                    preparedDiscTracks = std::move(discTrackFiles);
+                    preparedActiveDiscIndex = 0;
+
+                    LoadedAudio preview;
+                    preview.buffer = std::move(previewResult->buffer);
+                    preview.sampleRate = previewResult->sampleRate;
+                    sideAAudio = std::move(preview);
+                    sideAPath = previewTrackFile;
+                    sideADurationSec = sideAAudio->buffer.getNumSamples() / sideAAudio->sampleRate;
+                    hasSideB = false;
+                    sideBAudio.reset();
+                    sideBPath = juce::File();
+                    sideBDurationSec = 0.0;
+
+                    if (previewResult->referenceBuffer.getNumSamples() > 0)
+                    {
+                        LoadedAudio reference;
+                        reference.buffer = std::move(previewResult->referenceBuffer);
+                        reference.sampleRate = previewResult->sampleRate;
+                        mixtapeReferenceAudio = std::move(reference);
+                    }
+
+                    crashBreadcrumb("Updating UI after Prepare (showMixtapeSide)");
+                    showMixtapeSide(false);
+                    hasProcessed = true;
+                    preparedTapeLabel = profile.displayName;
+                    exportButton.setEnabled(true);
+                    burnButton.setEnabled(!preparedDiscTracks.empty());
+
+                    updateReadySummary();
+                    const juce::String doneMsg = cassetteCount > 1
+                                                     ? juce::String(cassetteCount) + " prepared track folders saved next to your music"
+                                                     : cdb::tr("status.prepared_tracks_done");
+                    setProgress(1.0);
+                    crashBreadcrumb("Prepare UI complete");
+                    finishProcessing(true, doneMsg);
+                }
+                catch (const std::exception& e)
                 {
-                    finishProcessing(false, "No prepared tracks produced");
-                    return;
+                    writeCrashLogToDesktop("CD Burner",
+                                           "Exception after Prepare (UI thread)",
+                                           juce::String(e.what()));
+                    finishProcessing(false, "Processing failed: " + juce::String(e.what()));
                 }
-
-                mixtapeCassetteCount = cassetteCount;
-                preparedDiscTracks = std::move(discTrackFiles);
-                preparedActiveDiscIndex = 0;
-
-                LoadedAudio preview;
-                preview.buffer = std::move(previewResult->buffer);
-                preview.sampleRate = previewResult->sampleRate;
-                sideAAudio = std::move(preview);
-                sideAPath = previewTrackFile;
-                sideADurationSec = sideAAudio->buffer.getNumSamples() / sideAAudio->sampleRate;
-                hasSideB = false;
-                sideBAudio.reset();
-                sideBPath = juce::File();
-                sideBDurationSec = 0.0;
-
-                if (previewResult->referenceBuffer.getNumSamples() > 0)
+                catch (...)
                 {
-                    LoadedAudio reference;
-                    reference.buffer = std::move(previewResult->referenceBuffer);
-                    reference.sampleRate = previewResult->sampleRate;
-                    mixtapeReferenceAudio = std::move(reference);
+                    writeCrashLogToDesktop("CD Burner",
+                                           "Unknown exception after Prepare (UI thread)",
+                                           {});
+                    finishProcessing(false, "Processing failed unexpectedly");
                 }
-
-                showMixtapeSide(false);
-                hasProcessed = true;
-                preparedTapeLabel = profile.displayName;
-                exportButton.setEnabled(true);
-                burnButton.setEnabled(!preparedDiscTracks.empty());
-
-                updateReadySummary();
-                const juce::String doneMsg = cassetteCount > 1
-                                                 ? juce::String(cassetteCount) + " prepared track folders saved next to your music"
-                                                 : cdb::tr("status.prepared_tracks_done");
-                setProgress(1.0);
-                finishProcessing(true, doneMsg);
             });
         }
         catch (const std::exception& e)
         {
+            writeCrashLogToDesktop("CD Burner", "Exception during Prepare (worker)", juce::String(e.what()));
             juce::MessageManager::callAsync([this, msg = juce::String(e.what())]() {
                 finishProcessing(false, "Processing failed: " + msg);
             });
         }
         catch (...)
         {
+            writeCrashLogToDesktop("CD Burner", "Unknown exception during Prepare (worker)", {});
             juce::MessageManager::callAsync([this]() {
                 finishProcessing(false, "Processing failed unexpectedly");
             });
