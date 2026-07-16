@@ -9,7 +9,7 @@
 #include <objbase.h>
 #include <imapi2.h>
 #include <imapi2fs.h>
-#include <atomic>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -38,9 +38,22 @@ void reportProgress(const CdBurnService::ProgressCallback& onProgress,
 
 juce::String hresultMessage(HRESULT hr)
 {
+    switch (static_cast<ULONG>(hr))
+    {
+        case 0xC0AA050D: return "audio stream rejected by Windows (invalid IStream / format)";
+        case 0xC0AA0509: return "not enough space on the disc for this track";
+        case 0xC0AA0508: return "too many tracks (CD limit is 99)";
+        case 0xC0AA0502: return "media was not prepared";
+        case 0xC0AA0504: return "only blank CD-R/CD-RW is supported";
+        case 0xC0AA050F: return "invalid client name";
+        case 0xC0AA0202: return "no compatible recorder / media";
+        default: break;
+    }
+
     return "Windows burn error 0x" + juce::String::toHexString(static_cast<int>(hr));
 }
 
+/** Raw Red Book PCM (44.1 kHz / 16-bit / stereo), padded to 2352-byte sectors. */
 std::vector<uint8_t> loadRedBookPcmSectors(const juce::File& wavFile)
 {
     juce::AudioFormatManager formatManager;
@@ -49,29 +62,37 @@ std::vector<uint8_t> loadRedBookPcmSectors(const juce::File& wavFile)
     if (reader == nullptr)
         return {};
 
-    if (reader->numChannels != 2 || reader->bitsPerSample != 16
+    if (reader->numChannels != 2
         || std::abs(reader->sampleRate - kRedBookSampleRate) > 1.0)
         return {};
 
-    juce::AudioBuffer<float> buffer(static_cast<int>(reader->numChannels),
-                                      static_cast<int>(reader->lengthInSamples));
-    reader->read(&buffer, 0, static_cast<int>(reader->lengthInSamples), 0, true, true);
+    const auto numSamples = static_cast<int>(reader->lengthInSamples);
+    if (numSamples <= 0)
+        return {};
 
-    std::vector<int16_t> interleaved(static_cast<size_t>(buffer.getNumSamples()) * 2);
-    for (int i = 0; i < buffer.getNumSamples(); ++i)
+    juce::AudioBuffer<float> floatBuffer(2, numSamples);
+    if (! reader->read(&floatBuffer, 0, numSamples, 0, true, true))
+        return {};
+
+    std::vector<uint8_t> bytes(static_cast<size_t>(numSamples) * 4u);
+    auto* dst = reinterpret_cast<int16_t*>(bytes.data());
+    for (int i = 0; i < numSamples; ++i)
     {
         for (int ch = 0; ch < 2; ++ch)
         {
-            const float sample = buffer.getSample(ch, i);
-            interleaved[static_cast<size_t>(i) * 2 + static_cast<size_t>(ch)] =
-                static_cast<int16_t>(juce::jlimit(-32768, 32767, static_cast<int>(std::lround(sample * 32767.0f))));
+            const float sample = floatBuffer.getSample(ch, i);
+            dst[i * 2 + ch] = static_cast<int16_t>(
+                juce::jlimit(-32768, 32767, static_cast<int>(std::lround(sample * 32767.0f))));
         }
     }
 
-    std::vector<uint8_t> bytes(interleaved.size() * sizeof(int16_t));
-    std::memcpy(bytes.data(), interleaved.data(), bytes.size());
-
+    // IMAPI requires the audio stream length to be a multiple of a CDDA sector (2352 bytes).
     constexpr size_t sectorSize = 2352;
+    // Minimum audio track length is 4 seconds (~705600 bytes). Pad if shorter.
+    constexpr size_t minTrackBytes = 44100u * 2u * 2u * 4u;
+    if (bytes.size() < minTrackBytes)
+        bytes.resize(minTrackBytes, 0);
+
     const size_t remainder = bytes.size() % sectorSize;
     if (remainder != 0)
         bytes.resize(bytes.size() + (sectorSize - remainder), 0);
@@ -79,80 +100,66 @@ std::vector<uint8_t> loadRedBookPcmSectors(const juce::File& wavFile)
     return bytes;
 }
 
-class PcmIStream final : public IStream
+HRESULT createPcmStream(const std::vector<uint8_t>& pcm, IStream** outStream)
 {
-public:
-    static HRESULT create(const std::vector<uint8_t>& dataIn, IStream** outStream)
-    {
-        if (outStream == nullptr)
-            return E_POINTER;
+    if (outStream == nullptr)
+        return E_POINTER;
+    *outStream = nullptr;
 
-        auto* stream = new PcmIStream(dataIn);
-        *outStream = stream;
-        return S_OK;
+    if (pcm.empty())
+        return E_INVALIDARG;
+
+    // CreateStreamOnHGlobal provides a complete IStream (Seek/Stat/Read) that IMAPI accepts.
+    // Returning STG_E_INVALIDFUNCTION from Seek/Stat causes E_IMAPI_DF2TAO_STREAM_NOT_SUPPORTED.
+    HGLOBAL memory = ::GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, pcm.size());
+    if (memory == nullptr)
+        return E_OUTOFMEMORY;
+
+    void* locked = ::GlobalLock(memory);
+    if (locked == nullptr)
+    {
+        ::GlobalFree(memory);
+        return E_OUTOFMEMORY;
     }
 
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject) override
+    std::memcpy(locked, pcm.data(), pcm.size());
+    ::GlobalUnlock(memory);
+
+    IStream* stream = nullptr;
+    HRESULT hr = ::CreateStreamOnHGlobal(memory, TRUE, &stream);
+    if (FAILED(hr))
     {
-        if (ppvObject == nullptr)
-            return E_POINTER;
-
-        if (riid == IID_IUnknown || riid == IID_IStream)
-        {
-            *ppvObject = static_cast<IStream*>(this);
-            AddRef();
-            return S_OK;
-        }
-
-        *ppvObject = nullptr;
-        return E_NOINTERFACE;
+        ::GlobalFree(memory);
+        return hr;
     }
 
-    STDMETHODIMP_(ULONG) AddRef() override { return static_cast<ULONG>(++refCount); }
-
-    STDMETHODIMP_(ULONG) Release() override
+    // Ensure Stat reports the exact PCM size (GlobalAlloc size can round up).
+    ULARGE_INTEGER size {};
+    size.QuadPart = static_cast<ULONGLONG>(pcm.size());
+    hr = stream->SetSize(size);
+    if (FAILED(hr))
     {
-        const auto count = --refCount;
-        if (count == 0)
-            delete this;
-        return static_cast<ULONG>(count);
+        stream->Release();
+        return hr;
     }
 
-    STDMETHODIMP Read(void* pv, ULONG cb, ULONG* pcbRead) override
+    LARGE_INTEGER zero {};
+    zero.QuadPart = 0;
+    stream->Seek(zero, STREAM_SEEK_SET, nullptr);
+
+    *outStream = stream;
+    return S_OK;
+}
+
+struct ComScope
+{
+    bool owned = false;
+    explicit ComScope(HRESULT hr) : owned(hr == S_OK || hr == S_FALSE) {}
+    ~ComScope()
     {
-        if (pv == nullptr)
-            return STG_E_INVALIDPOINTER;
-
-        const auto available = data.size() - position;
-        const auto toRead = static_cast<size_t>(juce::jmin<ULONG>(cb, static_cast<ULONG>(available)));
-        if (toRead > 0)
-            std::memcpy(pv, data.data() + position, toRead);
-        position += toRead;
-        if (pcbRead != nullptr)
-            *pcbRead = static_cast<ULONG>(toRead);
-        return toRead == cb ? S_OK : S_FALSE;
+        if (owned)
+            CoUninitialize();
     }
-
-    STDMETHODIMP Write(const void*, ULONG, ULONG*) override { return STG_E_ACCESSDENIED; }
-    STDMETHODIMP Seek(LARGE_INTEGER, DWORD, ULARGE_INTEGER*) override { return STG_E_INVALIDFUNCTION; }
-    STDMETHODIMP SetSize(ULARGE_INTEGER) override { return STG_E_INVALIDFUNCTION; }
-    STDMETHODIMP CopyTo(IStream*, ULARGE_INTEGER, ULARGE_INTEGER*, ULARGE_INTEGER*) override { return STG_E_INVALIDFUNCTION; }
-    STDMETHODIMP Commit(DWORD) override { return S_OK; }
-    STDMETHODIMP Revert() override { return STG_E_INVALIDFUNCTION; }
-    STDMETHODIMP LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return STG_E_INVALIDFUNCTION; }
-    STDMETHODIMP UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return STG_E_INVALIDFUNCTION; }
-    STDMETHODIMP Stat(STATSTG*, DWORD) override { return STG_E_INVALIDFUNCTION; }
-    STDMETHODIMP Clone(IStream**) override { return STG_E_INVALIDFUNCTION; }
-
-private:
-    explicit PcmIStream(const std::vector<uint8_t>& dataIn)
-        : data(dataIn)
-    {
-    }
-
-    std::vector<uint8_t> data;
-    size_t position = 0;
-    std::atomic<ULONG> refCount { 1 };
 };
 
 } // namespace
@@ -167,64 +174,34 @@ std::vector<CdBurnDevice> listDevices()
     std::vector<CdBurnDevice> devices;
 
     const HRESULT coHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const bool coOwned = SUCCEEDED(coHr);
+    ComScope scope(coHr);
 
     IDiscMaster2* discMaster = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_MsftDiscMaster2,
                                   nullptr,
-                                  CLSCTX_LOCAL_SERVER,
+                                  CLSCTX_ALL,
                                   IID_PPV_ARGS(&discMaster));
     if (FAILED(hr))
-    {
-        if (coOwned)
-            CoUninitialize();
         return devices;
-    }
 
-    IEnumVARIANT* enumerator = nullptr;
-    hr = discMaster->get__NewEnum(&enumerator);
-    if (SUCCEEDED(hr) && enumerator != nullptr)
+    LONG count = 0;
+    if (SUCCEEDED(discMaster->get_Count(&count)))
     {
-        VARIANT variant;
-        VariantInit(&variant);
-        ULONG fetched = 0;
-        while (enumerator->Next(1, &variant, &fetched) == S_OK)
+        for (LONG i = 0; i < count; ++i)
         {
-            if (variant.vt == VT_BSTR && variant.bstrVal != nullptr)
+            BSTR id = nullptr;
+            if (SUCCEEDED(discMaster->get_Item(i, &id)) && id != nullptr)
             {
                 CdBurnDevice device;
-                device.id = juce::String(variant.bstrVal);
+                device.id = juce::String(id);
                 device.displayName = device.id;
                 devices.push_back(std::move(device));
-            }
-            VariantClear(&variant);
-        }
-        enumerator->Release();
-    }
-    else
-    {
-        LONG count = 0;
-        if (SUCCEEDED(discMaster->get_Count(&count)))
-        {
-            for (LONG i = 0; i < count; ++i)
-            {
-                BSTR id = nullptr;
-                if (SUCCEEDED(discMaster->get_Item(i, &id)) && id != nullptr)
-                {
-                    CdBurnDevice device;
-                    device.id = juce::String(id);
-                    device.displayName = device.id;
-                    devices.push_back(std::move(device));
-                    SysFreeString(id);
-                }
+                SysFreeString(id);
             }
         }
     }
 
     discMaster->Release();
-    if (coOwned)
-        CoUninitialize();
-
     return devices;
 }
 
@@ -242,56 +219,68 @@ CdBurnResult burnAudioDisc(const CdBurnDevice& device,
     }
 
     const HRESULT coHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const bool coOwned = SUCCEEDED(coHr);
+    ComScope scope(coHr);
 
     IDiscRecorder2* recorder = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_MsftDiscRecorder2,
                                   nullptr,
-                                  CLSCTX_LOCAL_SERVER,
+                                  CLSCTX_ALL,
                                   IID_PPV_ARGS(&recorder));
     if (FAILED(hr))
-    {
-        if (coOwned)
-            CoUninitialize();
         return { false, "Failed to create disc recorder (" + hresultMessage(hr) + ")" };
-    }
 
-    const auto idWide = device.id.toWideCharPointer();
-    BSTR uniqueId = SysAllocString(idWide);
+    BSTR uniqueId = SysAllocString(device.id.toWideCharPointer());
     hr = recorder->InitializeDiscRecorder(uniqueId);
     SysFreeString(uniqueId);
     if (FAILED(hr))
     {
         recorder->Release();
-        if (coOwned)
-            CoUninitialize();
         return { false, "Failed to initialize recorder (" + hresultMessage(hr) + ")" };
     }
 
     IDiscFormat2TrackAtOnce* trackAtOnce = nullptr;
     hr = CoCreateInstance(CLSID_MsftDiscFormat2TrackAtOnce,
                           nullptr,
-                          CLSCTX_LOCAL_SERVER,
+                          CLSCTX_ALL,
                           IID_PPV_ARGS(&trackAtOnce));
     if (FAILED(hr))
     {
         recorder->Release();
-        if (coOwned)
-            CoUninitialize();
         return { false, "Failed to create burn engine (" + hresultMessage(hr) + ")" };
     }
 
-    trackAtOnce->put_Recorder(recorder);
-    trackAtOnce->put_ClientName(SysAllocString(L"CD Burner"));
+    hr = trackAtOnce->put_Recorder(recorder);
+    if (FAILED(hr))
+    {
+        trackAtOnce->Release();
+        recorder->Release();
+        return { false, "Failed to select recorder (" + hresultMessage(hr) + ")" };
+    }
+
+    BSTR clientName = SysAllocString(L"CD Burner");
+    hr = trackAtOnce->put_ClientName(clientName);
+    SysFreeString(clientName);
+    if (FAILED(hr))
+    {
+        trackAtOnce->Release();
+        recorder->Release();
+        return { false, "Failed to set burn client (" + hresultMessage(hr) + ")" };
+    }
+
+    VARIANT_BOOL supported = VARIANT_FALSE;
+    if (SUCCEEDED(trackAtOnce->IsRecorderSupported(recorder, &supported)) && supported == VARIANT_FALSE)
+    {
+        trackAtOnce->Release();
+        recorder->Release();
+        return { false, "This drive does not support audio CD burning." };
+    }
 
     hr = trackAtOnce->PrepareMedia();
     if (FAILED(hr))
     {
         trackAtOnce->Release();
         recorder->Release();
-        if (coOwned)
-            CoUninitialize();
-        return { false, "Insert a blank CD-R (" + hresultMessage(hr) + ")" };
+        return { false, "Insert a blank CD-R/CD-RW (" + hresultMessage(hr) + ")" };
     }
 
     const int trackCount = trackFiles.size();
@@ -309,20 +298,16 @@ CdBurnResult burnAudioDisc(const CdBurnDevice& device,
             trackAtOnce->ReleaseMedia();
             trackAtOnce->Release();
             recorder->Release();
-            if (coOwned)
-                CoUninitialize();
             return { false, "Failed to read track: " + trackFiles[i].getFileName() };
         }
 
         IStream* stream = nullptr;
-        hr = PcmIStream::create(pcm, &stream);
-        if (FAILED(hr))
+        hr = createPcmStream(pcm, &stream);
+        if (FAILED(hr) || stream == nullptr)
         {
             trackAtOnce->ReleaseMedia();
             trackAtOnce->Release();
             recorder->Release();
-            if (coOwned)
-                CoUninitialize();
             return { false, "Failed to create audio stream (" + hresultMessage(hr) + ")" };
         }
 
@@ -333,17 +318,15 @@ CdBurnResult burnAudioDisc(const CdBurnDevice& device,
             trackAtOnce->ReleaseMedia();
             trackAtOnce->Release();
             recorder->Release();
-            if (coOwned)
-                CoUninitialize();
-            return { false, "Failed to write track " + juce::String(i + 1) + " (" + hresultMessage(hr) + ")" };
+            return { false,
+                     "Failed to write track " + juce::String(i + 1) + " (" + hresultMessage(hr) + ")" };
         }
     }
 
     trackAtOnce->ReleaseMedia();
     trackAtOnce->Release();
+    recorder->EjectMedia();
     recorder->Release();
-    if (coOwned)
-        CoUninitialize();
 
     reportProgress(onProgress, trackCount, trackCount, 1.0, "Burn complete");
     return { true, {} };
